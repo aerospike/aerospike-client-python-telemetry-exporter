@@ -15,7 +15,8 @@ tests/
 ├── unit/otel
 ├── integration/recording/{sync,async}
 ├── integration/otel
-└── integration/docker          Aerospike server, collector, and Prometheus configs
+└── integration/docker          Aerospike server, collector, and Prometheus configs.
+                                Those containers share the Compose project aerospike-python-telemetry
 ```
 
 `common` has no vendor dependency. `recording` proves the client scheduler.
@@ -58,7 +59,8 @@ The image's single-node evaluation feature key is used. The container
 publishes that host port as its access address, so the client connects
 directly. Set `AEROSPIKE_HOST` to use a server that is already running
 instead. If that server advertises an address the client cannot reach, set
-`AEROSPIKE_USE_SERVICES_ALTERNATE=true`. The namespace is `test`. Tests
+`AEROSPIKE_USE_SERVICES_ALTERNATE=true`. Tests use the in-memory namespace
+`test`. The server also has `persist`, stored in a file. Tests
 register the exporter in `CUSTOM` mode and wait for the real scheduler. They
 do not call private timer methods.
 
@@ -79,6 +81,7 @@ rejects another export, async publish, catalog conflict.
 registries; two publishes on one exporter keep the latest document.
 
 `tests/unit/common/test_catalog.py` — one label rename for every metric,
+`client_app_ip` on every series,
 reserved webapp labels dropped, empty node or namespace names omitted,
 duplicate node names both yielded, departed nodes and non-numeric values
 omitted, unmapped fields absent, and the registry keeps the latest document.
@@ -89,7 +92,9 @@ that environment; a passed-in meter provider is enough and is not shut down;
 a provider plus an endpoint does not open a second OTLP connection; unset
 temporality follows the environment and an explicit value overrides it;
 `proxy_url` is set on the HTTP session and rejected for gRPC. HTTP appends
-`/v1/metrics`; gRPC keeps the endpoint without that path.
+`/v1/metrics`; gRPC keeps the endpoint without that path. A stalled
+endpoint times out, and a configured proxy with nothing listening fails
+the send. Both are logged, and the next `export` still stores the document.
 
 ### Integration
 
@@ -114,7 +119,10 @@ Aerospike export thread, and the provider keeps reporting the last
 `command_count` while that thread is stopped.
 
 `tests/integration/otel/test_webapp.py` — customer startup, an order write,
-operational and usage metrics, and shutdown.
+operational and usage metrics, `client_app_ip` on the snapshot, and
+shutdown. A second case registers that one exporter on two clients,
+`telemetry-it` and `telemetry-it-two`, and each cluster keeps its own
+document.
 
 `tests/integration/otel/test_collector.py` — the same webapp shape, with
 operational and usage metrics on, once over HTTP/protobuf and once over
@@ -125,10 +133,13 @@ totals match those calls: read, write, batch, and query. Prometheus
 SDK fast path does not count. The five latency bucket names still do not
 arrive as their own series. With `-s`, the test prints the comparison.
 
-`tests/integration/otel/test_identity_defaults.py` — omitted `app_id` is
-`not-set`, omitted `cluster_name` is the server name, the SDK fills client
-type and version, omitted labels are empty, two clients on the default app id
-share one snapshot, two app ids keep both.
+`tests/integration/otel/test_identity_defaults.py` — `app_id` is the name
+that keeps a client unique on one cluster. Omitting it stores `not-set`,
+unless the client has a username, which is then used as `app_id`.
+Omitting `cluster_name` stores the server name. The SDK fills client type
+and version. Omitted labels are empty. Two clients on the default app id
+share one snapshot. Two app ids keep both. The same app id on two clusters
+stays two series, because `cluster` is on every series.
 
 `tests/integration/otel/test_multiple_exporters.py` — two OTel exporters each
 receive the snapshot, three exporters receive the same metrics aside from

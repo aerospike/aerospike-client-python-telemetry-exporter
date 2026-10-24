@@ -28,6 +28,7 @@ from aerospike_client_telemetry.common.catalog import (
     iter_metric_points,
     rename_label,
     series_attributes,
+    client_app_ip,
 )
 from aerospike_client_telemetry.common.registry import ClientSnapshotRegistry
 
@@ -42,4 +43,5 @@ __all__ = [
     "iter_metric_points",
     "rename_label",
     "series_attributes",
+    "client_app_ip",
 ]

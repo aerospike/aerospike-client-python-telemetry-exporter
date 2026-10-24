@@ -66,6 +66,22 @@ def test_one_label_rename_applies_to_every_metric():
     assert CATALOG.by_source("cluster.nodes.active").kind is InstrumentKind.GAUGE
 
 
+def test_client_app_ip_is_on_every_series(monkeypatch):
+    monkeypatch.setattr(
+        "aerospike_client_telemetry.common.catalog.client_app_ip",
+        lambda: "198.51.100.8",
+    )
+    document = _document()
+    command = series_attributes(document)
+    _, extra = next(iter_metric_points(document, CATALOG.by_source("namespace.errors")))
+    errors = series_attributes(document, extra)
+    assert command["client_app_ip"] == "198.51.100.8"
+    assert errors["client_app_ip"] == command["client_app_ip"]
+    assert errors["namespace"] == "test"
+    document["labels"] = {**document["labels"], "client_app_ip": "203.0.113.10"}
+    assert series_attributes(document)["client_app_ip"] == "203.0.113.10"
+
+
 def test_latency_names_are_in_the_catalog_without_bucket_values():
     document = _document()
     document["nodes"][0]["namespaces"][0]["latency"] = {"read": [1, 2, 3]}

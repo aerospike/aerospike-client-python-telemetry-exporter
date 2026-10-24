@@ -15,7 +15,8 @@
 ``app_id()`` and ``cluster_name()`` are optional. The SDK still stamps
 ``client_type`` and ``client_version``. ``MetricsPolicy.labels`` defaults to
 an empty map. Two clients that both land on ``app_id`` ``not-set`` share one
-registry entry.
+registry entry. A client that sets a username and no ``app_id`` reports
+that username.
 """
 
 from __future__ import annotations
@@ -124,6 +125,37 @@ def test_omitted_app_id_is_not_set():
                 )
             )
         ]
+    finally:
+        _shutdown(exporter, cluster)
+
+
+def test_omitted_app_id_uses_the_username():
+    host, port = seed_host()
+    exporter = _exporter()
+    cluster = None
+    try:
+        cluster = (
+            ClusterDefinition(host, port)
+            .with_system_settings(custom_metrics_settings())
+            .with_native_credentials("orders-user", "secret")
+            .connect()
+        )
+    except Exception as exc:
+        exporter.close()
+        pytest.skip(f"Aerospike seed {host}:{port} unavailable: {exc}")
+
+    try:
+        cluster.add_exporter(exporter)
+        _enable(cluster)
+        _write(cluster, "username_app_id")
+        documents = _wait(
+            exporter,
+            lambda docs: any(doc.get("app_id") == "orders-user" for doc in docs.values()),
+            "username was not used as app_id",
+        )
+        document = next(doc for doc in documents.values() if doc.get("app_id") == "orders-user")
+        assert document["app_id"] == "orders-user"
+        assert "orders-user" in next(iter(documents))
     finally:
         _shutdown(exporter, cluster)
 

@@ -15,7 +15,8 @@
 One Aerospike server for the session. ``AEROSPIKE_HOST`` selects an existing
 server and no container is started. Otherwise an Enterprise 8.2 container is
 started on an ephemeral host port and stopped at the end of the session. The
-image's built-in single-node evaluation feature key is used.
+image's built-in single-node evaluation feature key is used. The server, the
+collector, and Prometheus share the Compose project ``aerospike-python-telemetry``.
 """
 
 from __future__ import annotations
@@ -27,6 +28,8 @@ import tempfile
 import time
 
 import pytest
+
+from tests.integration.compose_group import container_name, labels, project_network, stop_network
 
 # Pin Enterprise Edition. The Python SDK requires server 8.2.0 or later.
 # The image includes a single-node evaluation feature key.
@@ -41,11 +44,47 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
-def _render_config(host_port: int, directory: str) -> str:
-    text = _CONFIG_TEMPLATE.read_text().replace("__HOST_PORT__", str(host_port))
+def _render_config(host_port: int, directory: str, cluster_name: str) -> str:
+    text = (
+        _CONFIG_TEMPLATE.read_text()
+        .replace("__HOST_PORT__", str(host_port))
+        .replace("__CLUSTER_NAME__", cluster_name)
+    )
     path = Path(directory) / "aerospike.conf"
     path.write_text(text)
     return str(path)
+
+
+def _start_server(cluster_name: str, service: str):
+    """Start one server in the Compose project. Return container, directory, and seed."""
+    from testcontainers.core.container import DockerContainer
+
+    host_port = _free_port()
+    directory = tempfile.TemporaryDirectory(prefix=f"{service}-")
+    container = (
+        DockerContainer(SERVER_IMAGE)
+        .with_name(container_name(service))
+        .with_kwargs(labels=labels(service))
+        .with_network(project_network())
+        .with_network_aliases(service)
+        .with_bind_ports(3000, host_port)
+        .with_volume_mapping(
+            _render_config(host_port, directory.name, cluster_name),
+            "/etc/aerospike/aerospike.template.conf",
+            "ro",
+        )
+    )
+    try:
+        container.start()
+        _wait_until_ready(container, host_port)
+    except Exception:
+        try:
+            container.stop()
+        except Exception:
+            pass
+        directory.cleanup()
+        raise
+    return container, directory, f"127.0.0.1:{host_port}"
 
 
 def _info(host: str, port: int, command: str) -> str:
@@ -87,7 +126,14 @@ def _wait_until_ready(container, host_port: int) -> None:
 
 
 @pytest.fixture(scope="session", autouse=True)
-def aerospike_server():
+def compose_project():
+    """Remove the Compose network after every container in the session has stopped."""
+    yield
+    stop_network()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def aerospike_server(compose_project):
     """Provide ``AEROSPIKE_HOST`` for every integration test."""
     os.environ.setdefault("AEROSPIKE_NAMESPACE", "test")
     configured = os.environ.get("AEROSPIKE_HOST", "").strip()
@@ -95,38 +141,46 @@ def aerospike_server():
         yield configured
         return
 
-    host_port = _free_port()
     try:
-        from testcontainers.core.container import DockerContainer
+        from testcontainers.core.container import DockerContainer  # noqa: F401
     except ImportError:
         pytest.skip("testcontainers is not installed; pip install -e '.[dev]'")
 
-    directory = tempfile.TemporaryDirectory(prefix="aerospike-telemetry-")
-    container = (
-        DockerContainer(SERVER_IMAGE)
-        .with_bind_ports(3000, host_port)
-        .with_volume_mapping(
-            _render_config(host_port, directory.name),
-            "/etc/aerospike/aerospike.template.conf",
-            "ro",
-        )
-    )
     try:
-        container.start()
-        _wait_until_ready(container, host_port)
+        container, directory, seed = _start_server("telemetry-it", "aerospike")
     except Exception as exc:
-        container.stop()
-        directory.cleanup()
         message = f"Unable to start Aerospike {SERVER_IMAGE}: {exc}"
         if os.environ.get("CI"):
             pytest.fail(message)
         pytest.skip(message)
 
-    seed = f"127.0.0.1:{host_port}"
     # access-address and access-port are already the host endpoint. Alternate
     # discovery is empty on this single node and the client times out with it on.
     os.environ["AEROSPIKE_HOST"] = seed
     os.environ["AEROSPIKE_USE_SERVICES_ALTERNATE"] = "false"
+    try:
+        yield seed
+    finally:
+        container.stop()
+        directory.cleanup()
+
+
+@pytest.fixture
+def aerospike_server_two():
+    """A second cluster, ``telemetry-it-two``, for the one-exporter webapp case."""
+    try:
+        from testcontainers.core.container import DockerContainer  # noqa: F401
+    except ImportError:
+        pytest.skip("testcontainers is not installed; pip install -e '.[dev]'")
+
+    try:
+        container, directory, seed = _start_server("telemetry-it-two", "aerospike-two")
+    except Exception as exc:
+        message = f"Unable to start Aerospike {SERVER_IMAGE}: {exc}"
+        if os.environ.get("CI"):
+            pytest.fail(message)
+        pytest.skip(message)
+
     try:
         yield seed
     finally:

@@ -41,8 +41,9 @@ from aerospike_sdk.metrics import MetricsExporterType, MetricsPolicy
 from aerospike_sdk.policy.system_settings import MetricsSettings, SystemSettings
 from aerospike_sdk.sync import ClusterDefinition
 
-from aerospike_client_telemetry.common import CATALOG
+from aerospike_client_telemetry.common import CATALOG, client_app_ip
 from aerospike_client_telemetry.otel import OtelExporter, OtelExporterConfig, Protocol
+from tests.integration.compose_group import container_name, labels, project_network
 from tests.integration.support import CALLBACK_TIMEOUT_SECONDS, namespace, seed_host
 
 pytestmark = pytest.mark.integration
@@ -68,7 +69,6 @@ def otel_collector():
     """Start the collector and Prometheus. Yield HTTP port, gRPC port, file, and query port."""
     try:
         from testcontainers.core.container import DockerContainer
-        from testcontainers.core.network import Network
     except ImportError:
         pytest.skip("testcontainers is not installed; pip install -e '.[dev]'")
 
@@ -78,13 +78,14 @@ def otel_collector():
     output = tempfile.TemporaryDirectory(prefix="otel-collector-")
     os.chmod(output.name, 0o777)
     metrics = Path(output.name) / "metrics.json"
-    network = None
     collector = None
     prometheus = None
     try:
-        network = Network().create()
+        network = project_network()
         collector = (
             DockerContainer(COLLECTOR_IMAGE)
+            .with_name(container_name("otel-collector"))
+            .with_kwargs(labels=labels("otel-collector"))
             .with_network(network)
             .with_network_aliases("otel-collector")
             .with_bind_ports(4318, http_port)
@@ -97,6 +98,8 @@ def otel_collector():
         _wait_for_port(grpc_port)
         prometheus = (
             DockerContainer(PROMETHEUS_IMAGE)
+            .with_name(container_name("prometheus"))
+            .with_kwargs(labels=labels("prometheus"))
             .with_network(network)
             .with_bind_ports(9090, prometheus_port)
             .with_volume_mapping(str(_PROMETHEUS_CONFIG), "/etc/prometheus/prometheus.yml", "ro")
@@ -105,7 +108,7 @@ def otel_collector():
         _wait_for_port(prometheus_port)
     except Exception as exc:
         logs = _logs(collector) + "\n" + _logs(prometheus)
-        _stop(prometheus, collector, output, network)
+        _stop(prometheus, collector, output)
         message = f"Unable to start the collector and Prometheus: {exc}\n{logs}"
         if os.environ.get("CI"):
             pytest.fail(message)
@@ -114,10 +117,10 @@ def otel_collector():
     try:
         yield http_port, grpc_port, metrics, collector, prometheus_port
     finally:
-        _stop(prometheus, collector, output, network)
+        _stop(prometheus, collector, output)
 
 
-def _stop(prometheus, collector, output, network) -> None:
+def _stop(prometheus, collector, output) -> None:
     for container in (prometheus, collector):
         if container is not None:
             try:
@@ -126,11 +129,6 @@ def _stop(prometheus, collector, output, network) -> None:
                 pass
     if output is not None:
         output.cleanup()
-    if network is not None:
-        try:
-            network.remove()
-        except Exception:
-            pass
 
 
 def _wait_for_port(port: int) -> None:
@@ -445,7 +443,11 @@ def test_webapp_pushes_a_client_metric_to_the_collector(otel_collector, protocol
             MetricsPolicy(
                 operational_enabled=True,
                 usage_enabled=True,
-                labels={"environment": "prod", "region": "us-west"},
+                labels={
+                    "environment": "prod",
+                    "region": "us-west",
+                    "client_app_ip": client_app_ip(),
+                },
             )
         )
         session = cluster.create_session()
@@ -494,6 +496,7 @@ def test_webapp_pushes_a_client_metric_to_the_collector(otel_collector, protocol
         assert command["metric"]["app_id"] == "orders-service"
         assert command["metric"]["cluster"] == "telemetry-it"
         assert command["metric"]["environment"] == "prod"
+        assert command["metric"]["client_app_ip"] == client_app_ip()
         assert command["metric"]["service_name"] == "orders-service"
         assert exporter.config.protocol is protocol
         assert float(command["value"][1]) == tally.recorded_commands

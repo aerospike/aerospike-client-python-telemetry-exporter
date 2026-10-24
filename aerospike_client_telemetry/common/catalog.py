@@ -23,6 +23,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from enum import Enum
+import socket
 from typing import Any, Optional
 
 
@@ -64,6 +65,8 @@ RESERVED_LABELS = frozenset(
 )
 
 _IDENTITY = ("client_type", "client_version", "cluster_name", "app_id")
+_CLIENT_APP_IP_LABEL = "client_app_ip"
+_client_app_ip = ""
 _NODE_LABELS = ("node", "node_address", "node_port")
 _NAMESPACE_LABELS = _NODE_LABELS + ("namespace",)
 
@@ -307,6 +310,27 @@ def rename_label(name: str, label_map: Optional[Mapping[str, str]] = None) -> st
     return mapping.get(name, name)
 
 
+def client_app_ip() -> str:
+    """IPv4 address of the process exporting metrics.
+
+    A UDP socket chooses the outbound interface and does not send a packet.
+    The webapp can set the ``client_app_ip`` label itself; that value is kept.
+    """
+    global _client_app_ip
+    if _client_app_ip:
+        return _client_app_ip
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("192.0.2.1", 1))
+            _client_app_ip = sock.getsockname()[0]
+    except OSError:
+        try:
+            _client_app_ip = socket.gethostbyname(socket.gethostname())
+        except OSError:
+            _client_app_ip = ""
+    return _client_app_ip
+
+
 def series_attributes(
     document: Mapping[str, Any],
     extra: Optional[Mapping[str, Any]] = None,
@@ -315,8 +339,9 @@ def series_attributes(
     """Labels for one series.
 
     Identity is renamed through the global map. A webapp label that lands on
-    a reserved name is dropped. ``extra`` holds dimensions for this point,
-    such as ``node`` or ``namespace``, and those are renamed by the same map.
+    a reserved name is dropped. ``client_app_ip`` is the webapp address and is on
+    every series. ``extra`` holds dimensions for this point, such as ``node``
+    or ``namespace``, and those are renamed by the same map.
     """
     attributes: dict[str, str] = {}
     for source in _IDENTITY:
@@ -331,6 +356,10 @@ def series_attributes(
             if exported in RESERVED_LABELS or exported in attributes:
                 continue
             attributes[exported] = str(value)
+    if _CLIENT_APP_IP_LABEL not in attributes:
+        app_ip = client_app_ip()
+        if app_ip:
+            attributes[_CLIENT_APP_IP_LABEL] = app_ip
     if extra:
         for key, value in extra.items():
             if value is None or value == "":

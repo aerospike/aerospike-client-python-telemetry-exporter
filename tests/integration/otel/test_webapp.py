@@ -30,6 +30,7 @@ from aerospike_sdk.metrics import MetricsExporterType, MetricsPolicy
 from aerospike_sdk.policy.system_settings import MetricsSettings, SystemSettings
 from aerospike_sdk.sync import ClusterDefinition
 
+from aerospike_client_telemetry.common import client_app_ip, series_attributes
 from aerospike_client_telemetry.otel import OtelExporter, OtelExporterConfig, Protocol
 from tests.integration.support import CALLBACK_TIMEOUT_SECONDS, namespace, seed_host
 
@@ -38,6 +39,10 @@ pytestmark = pytest.mark.integration
 # Shortened so this test can observe one real interval. A service would use
 # its own interval, often 30 seconds or more.
 _EXPORT_INTERVAL = timedelta(seconds=1)
+
+
+def _webapp_labels() -> dict[str, str]:
+    return {"environment": "prod", "region": "us-west", "client_app_ip": client_app_ip()}
 
 
 class OrdersWebapp:
@@ -77,7 +82,7 @@ class OrdersWebapp:
                 # the application called).
                 operational_enabled=True,
                 usage_enabled=True,
-                labels={"environment": "prod", "region": "us-west"},
+                labels=_webapp_labels(),
             )
         )
 
@@ -93,6 +98,51 @@ class OrdersWebapp:
             self.cluster.close()
             self.cluster = None
         self.exporter.close()
+
+
+def _connect(exporter: OtelExporter, host: str, port: int):
+    """One Aerospike client in the webapp, registered on the shared exporter."""
+    cluster = (
+        ClusterDefinition(host, port)
+        .app_id("orders-service")
+        .with_system_settings(
+            SystemSettings(
+                metrics=MetricsSettings(
+                    exporter=MetricsExporterType.CUSTOM,
+                    export_interval=_EXPORT_INTERVAL,
+                )
+            )
+        )
+        .connect()
+    )
+    cluster.add_exporter(exporter)
+    cluster.enable_metrics(
+        MetricsPolicy(
+            operational_enabled=True,
+            usage_enabled=True,
+            labels=_webapp_labels(),
+        )
+    )
+    return cluster
+
+
+def _place(cluster, namespace_name: str, order_id: int) -> None:
+    session = cluster.create_session()
+    key = DataSet.of(namespace_name, "orders").id(order_id)
+    session.upsert(key).put({"sku": f"sku-{order_id}", "qty": 1}).execute()
+
+
+def _document_for(exporter: OtelExporter, cluster_name: str, minimum: int = 1) -> dict:
+    deadline = time.monotonic() + CALLBACK_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        for key in exporter.registry.client_keys():
+            document = exporter.registry.current(key)
+            if document and document.get("cluster_name") == cluster_name:
+                count = document["cluster"]["command_count"]
+                if count >= minimum:
+                    return document
+        time.sleep(0.05)
+    raise AssertionError(f"no snapshot for cluster {cluster_name}")
 
 
 def _snapshot_for(app: OrdersWebapp, app_id: str) -> dict:
@@ -122,7 +172,8 @@ def test_orders_webapp_exports_client_telemetry():
         document = _snapshot_for(app, "orders-service")
         assert document["client_type"] == "python-sdk"
         assert document["app_id"] == "orders-service"
-        assert document["labels"] == {"environment": "prod", "region": "us-west"}
+        assert document["labels"] == _webapp_labels()
+        assert series_attributes(document)["client_app_ip"] == client_app_ip()
         assert document["operational_metrics_enabled"] is True
         assert document["usage_metrics_enabled"] is True
         assert document["usage"]["feature.api.blocking"] >= 1
@@ -135,3 +186,51 @@ def test_orders_webapp_exports_client_telemetry():
         assert app.exporter.config.headers == {"authorization": "Bearer orders-token"}
     finally:
         app.shutdown()
+
+
+def test_one_exporter_keeps_two_clusters_independent(aerospike_server_two):
+    host, port = seed_host()
+    other_host, _, other_port = aerospike_server_two.rpartition(":")
+    namespace_name = namespace()
+    exporter = OtelExporter(
+        OtelExporterConfig(
+            service_name="orders-service",
+            endpoint="http://127.0.0.1:4318/v1/metrics",
+            protocol=Protocol.HTTP_PROTOBUF,
+            headers={"authorization": "Bearer orders-token"},
+        )
+    )
+    clusters = []
+    try:
+        clusters.append(_connect(exporter, host, port))
+        clusters.append(_connect(exporter, other_host, int(other_port)))
+        _place(clusters[0], namespace_name, 1)
+        _place(clusters[1], namespace_name, 2)
+        _place(clusters[1], namespace_name, 3)
+        first = _document_for(exporter, "telemetry-it")
+        second = _document_for(exporter, "telemetry-it-two", minimum=2)
+        assert len(exporter.registry.client_keys()) == 2
+        assert clusters[0].exporters == (exporter,)
+        assert clusters[1].exporters == (exporter,)
+        assert first["app_id"] == second["app_id"] == "orders-service"
+        assert first["cluster_name"] == "telemetry-it"
+        assert second["cluster_name"] == "telemetry-it-two"
+        assert first["cluster"]["command_count"] >= 1
+        held = second["cluster"]["command_count"]
+        assert held >= 2
+        _place(clusters[0], namespace_name, 4)
+        moved = _document_for(exporter, "telemetry-it")
+        deadline = time.monotonic() + CALLBACK_TIMEOUT_SECONDS
+        while moved["cluster"]["command_count"] <= first["cluster"]["command_count"]:
+            if time.monotonic() > deadline:
+                break
+            time.sleep(0.05)
+            moved = _document_for(exporter, "telemetry-it")
+        assert moved["cluster"]["command_count"] > first["cluster"]["command_count"]
+        still = _document_for(exporter, "telemetry-it-two")
+        assert still["cluster"]["command_count"] == held
+    finally:
+        for cluster in clusters:
+            cluster.disable_metrics()
+            cluster.close()
+        exporter.close()

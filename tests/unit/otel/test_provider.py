@@ -12,6 +12,11 @@
 
 """The two meter-provider startups."""
 
+from datetime import timedelta
+import logging
+import socket
+import time
+
 import pytest
 
 from aerospike_client_telemetry.otel import OtelExporter, OtelExporterConfig, Protocol, Temporality
@@ -169,6 +174,74 @@ def test_proxy_url_is_rejected_for_grpc():
                 proxy_url="http://127.0.0.1:8888",
             )
         )
+
+
+def _document(command_count):
+    return {
+        "client_type": "python-sdk",
+        "client_version": "1.0.0",
+        "cluster_name": "local",
+        "app_id": "orders-service",
+        "cluster": {"command_count": command_count},
+    }
+
+
+def _closed_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _assert_send_fails_and_export_continues(exporter, caplog) -> None:
+    """A failed OTLP send is logged. ``export`` still stores the next document."""
+    exporter.export(_Snapshot(_document(4)))
+    caplog.clear()
+    started = time.monotonic()
+    with caplog.at_level(logging.WARNING):
+        assert exporter.meter_provider.force_flush() is True
+    elapsed = time.monotonic() - started
+    assert elapsed < 5, f"send ran {elapsed:.1f}s, past the one-second timeout"
+    assert "Failed to export" in caplog.text
+    exporter.export(_Snapshot(_document(5)))
+    stored = exporter.registry.current(exporter.registry.client_keys()[0])
+    assert stored["cluster"]["command_count"] == 5
+
+
+def test_a_stalled_endpoint_times_out_and_export_continues(caplog):
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    port = listener.getsockname()[1]
+    exporter = OtelExporter(
+        OtelExporterConfig(
+            endpoint=f"http://127.0.0.1:{port}",
+            timeout=timedelta(seconds=1),
+        )
+    )
+    try:
+        _assert_send_fails_and_export_continues(exporter, caplog)
+        assert "timeout" in caplog.text.lower()
+    finally:
+        exporter.close()
+        listener.close()
+
+
+def test_an_unreachable_proxy_fails_and_export_continues(caplog):
+    proxy_port = _closed_port()
+    exporter = OtelExporter(
+        OtelExporterConfig(
+            endpoint="http://127.0.0.1:9/v1/metrics",
+            proxy_url=f"http://127.0.0.1:{proxy_port}",
+            timeout=timedelta(seconds=1),
+        )
+    )
+    try:
+        _assert_send_fails_and_export_continues(exporter, caplog)
+        result = _reader(exporter)._exporter._client.export(b"")
+        assert result.success is False
+        assert str(proxy_port) in str(result.error)
+    finally:
+        exporter.close()
 
 
 def test_a_meter_provider_is_enough_and_close_leaves_it_running():
