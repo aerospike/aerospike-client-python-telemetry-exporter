@@ -35,6 +35,7 @@ class RecordedExport:
     timestamp: str
     client_type: str
     client_version: str
+    conn_type: str
     cluster_name: str
     app_id: str
     node_names: tuple[str, ...]
@@ -55,6 +56,7 @@ def translate_snapshot(document: Mapping[str, Any]) -> RecordedExport:
         timestamp=str(document.get("timestamp", "")),
         client_type=str(document.get("client_type", "")),
         client_version=str(document.get("client_version", "")),
+        conn_type=str(document.get("conn_type", "")),
         cluster_name=str(document.get("cluster_name", "")),
         app_id=str(document.get("app_id", "")),
         node_names=tuple(_node_name(node) for node in nodes if isinstance(node, Mapping)),

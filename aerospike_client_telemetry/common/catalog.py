@@ -64,7 +64,7 @@ RESERVED_LABELS = frozenset(
     }
 )
 
-_IDENTITY = ("client_type", "client_version", "cluster_name", "app_id")
+_IDENTITY = ("client_type", "client_version", "conn_type", "cluster_name", "app_id")
 _CLIENT_APP_IP_LABEL = "client_app_ip"
 _client_app_ip = ""
 _NODE_LABELS = ("node", "node_address", "node_port")

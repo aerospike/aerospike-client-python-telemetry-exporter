@@ -23,7 +23,8 @@ tests/
 `otel` publishes each canonical document into the registry and returns.
 The OpenTelemetry reader sends OTLP later. A failed send does not raise
 from `export`, so the client keeps calling it. `timeout` bounds the
-OpenTelemetry client's 6 retries. There is no retry-count setting.
+OpenTelemetry send; retry count and backoff belong to the installed
+OpenTelemetry exporter version. There is no retry-count setting.
 `close()` is what makes a later `export` raise. Install that backend
 with `pip install -e ".[otel]"`.
 Import it from `aerospike_client_telemetry.otel`. The top-level package does not
@@ -42,6 +43,12 @@ python -m pip show aerospike-sdk aerospike-native
 
 `aerospike-sdk` must report the local SDK checkout as its editable project
 location. The client branch used here is `CLIENT-OM-372`.
+
+Async SDK clients preserve the application's event loop by default. For
+custom exporters that may block, the client can opt into a dedicated exporter
+event loop with `MetricsSettings(async_exporter_isolation=True)`. An exporter
+using that mode must not depend on asyncio objects bound to the application
+loop.
 
 ## Tests
 
@@ -138,14 +145,14 @@ corresponding snapshot total. With `-s`, the test prints the comparison.
 `tests/integration/otel/test_identity_defaults.py` — `app_id` is the name
 that keeps a client unique on one cluster. Omitting it stores `not-set`,
 unless the client has a username, which is then used as `app_id`.
-Omitting `cluster_name` stores the server name. The SDK fills client type
-and version. Omitted labels are empty. Two clients on the default app id
+Omitting `cluster_name` stores the server name. The SDK fills client type,
+version, and `conn_type` (`sync` or `async`). Omitted labels are empty. Two clients on the default app id
 share one snapshot. Two app ids keep both. The same app id on two clusters
 stays two series, because `cluster` is on every series.
 
 `tests/integration/otel/test_multiple_exporters.py` — two OTel exporters each
-receive the snapshot, three exporters receive the same metrics aside from
-`timestamp`, registering the same exporter twice calls `export` twice while
+receive the snapshot, three exporters receive the same canonical document
+including its stable timestamp, registering the same exporter twice calls `export` twice while
 the registry keeps one document, and two clusters that each register a
 different exporter keep separate registries.
 

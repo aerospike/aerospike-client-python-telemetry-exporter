@@ -57,7 +57,7 @@ def _client_key(document: Mapping[str, Any]) -> str:
     """Index the document by the identity fields the client already set."""
     return "\n".join(
         str(document.get(name, ""))
-        for name in ("client_type", "client_version", "cluster_name", "app_id")
+        for name in ("client_type", "client_version", "conn_type", "cluster_name", "app_id")
     )
 
 

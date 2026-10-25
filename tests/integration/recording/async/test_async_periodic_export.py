@@ -104,6 +104,7 @@ class TestAsyncPeriodicExport:
             )
             record = exporter.records[0]
             assert record.client_type == "python-sdk"
+            assert record.conn_type == "async"
             assert record.app_id == "telemetry-exporter-itest"
             assert record.node_names
             assert exporter.closed is False

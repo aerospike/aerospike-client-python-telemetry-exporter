@@ -121,10 +121,7 @@ def test_two_otel_exporters_each_receive_the_snapshot():
 
 
 def _metrics(exporter: _CountingExporter) -> dict:
-    document = dict(exporter.registry.current(exporter.registry.client_keys()[0]))
-    # Each export calls to_canonical_dict(), which stamps timestamp at that moment.
-    document.pop("timestamp", None)
-    return document
+    return dict(exporter.registry.current(exporter.registry.client_keys()[0]))
 
 
 def test_three_exporters_receive_the_same_metrics():

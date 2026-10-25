@@ -120,6 +120,7 @@ def test_omitted_app_id_is_not_set():
                 (
                     document["client_type"],
                     document["client_version"],
+                    document["conn_type"],
                     document["cluster_name"],
                     "not-set",
                 )

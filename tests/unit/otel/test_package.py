@@ -97,6 +97,7 @@ def test_otel_exporters_publish_without_retaining_the_snapshot():
         "timestamp": "2026-01-01T00:00:00+00:00",
         "client_type": "python-sdk",
         "client_version": "1.0.0",
+        "conn_type": "sync",
         "cluster_name": "local",
         "app_id": "checkout",
     }
@@ -105,7 +106,7 @@ def test_otel_exporters_publish_without_retaining_the_snapshot():
     exporter = OtelExporter(config)
     check_exporter(exporter, awaitable=False)
     exporter.export(snapshot)
-    stored = exporter.registry.current("python-sdk\n1.0.0\nlocal\ncheckout")
+    stored = exporter.registry.current("python-sdk\n1.0.0\nsync\nlocal\ncheckout")
     assert stored is document
     assert stored["app_id"] == "checkout"
     exporter.close()
@@ -118,8 +119,10 @@ async def test_async_otel_exporter_matches_the_async_protocol():
     config = OtelExporterConfig(service_name="checkout", endpoint="http://127.0.0.1:4318")
     exporter = AsyncOtelExporter(config)
     check_exporter(exporter, awaitable=True)
-    await exporter.export(_Snapshot({"client_type": "python-sdk", "app_id": "checkout"}))
-    assert exporter.registry.client_keys() == ("python-sdk\n\n\ncheckout",)
+    await exporter.export(
+        _Snapshot({"client_type": "python-sdk", "conn_type": "async", "app_id": "checkout"})
+    )
+    assert exporter.registry.client_keys() == ("python-sdk\n\nasync\n\ncheckout",)
     exporter.close()
 
 

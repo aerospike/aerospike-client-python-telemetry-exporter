@@ -34,13 +34,14 @@ def _document(marker: str) -> dict:
     return {
         "client_type": "python-sdk",
         "client_version": "1.0.0",
+        "conn_type": "sync",
         "cluster_name": "local",
         "app_id": "orders-service",
         "marker": marker,
     }
 
 
-_KEY = "python-sdk\n1.0.0\nlocal\norders-service"
+_KEY = "python-sdk\n1.0.0\nsync\nlocal\norders-service"
 
 
 def test_two_exporters_keep_separate_registries():

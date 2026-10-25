@@ -27,6 +27,7 @@ def _document():
     return {
         "client_type": "python-sdk",
         "client_version": "1.0.0",
+        "conn_type": "sync",
         "cluster_name": "local",
         "app_id": "orders-service",
         "labels": {"environment": "prod", "cluster_name": "spoofed", "region": "us-west"},
@@ -130,7 +131,8 @@ def test_reserved_and_non_mapping_labels_are_dropped():
     assert labels["app_id"] == "orders-service"
     assert labels["client_type"] == "python-sdk"
     assert labels["client_version"] == "1.0.0"
-    for dropped in ("node", "namespace", "feature", "le", "node_address", "node_port", "conn_type"):
+    assert labels["conn_type"] == "sync"
+    for dropped in ("node", "namespace", "feature", "le", "node_address", "node_port"):
         assert dropped not in labels
 
     document["labels"] = ["environment:prod"]

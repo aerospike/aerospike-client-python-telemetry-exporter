@@ -30,6 +30,7 @@ def _document():
         "timestamp": "2026-01-01T00:00:00+00:00",
         "client_type": "python-sdk",
         "client_version": "1.0.0",
+        "conn_type": "sync",
         "cluster_name": "local",
         "app_id": "telemetry-exporter",
         "labels": {"owner": "platform"},
@@ -113,6 +114,7 @@ def test_translate_snapshot_reads_without_mutating():
 
     assert document == original
     assert record.client_type == "python-sdk"
+    assert record.conn_type == "sync"
     assert record.app_id == "telemetry-exporter"
     assert record.node_names == ("BB9",)
     assert record.command_count == 4
