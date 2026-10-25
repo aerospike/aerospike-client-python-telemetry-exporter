@@ -80,7 +80,9 @@ def _observations(registry: ClientSnapshotRegistry, descriptor: MetricDescriptor
 def _register_instruments(meter: Any, registry: ClientSnapshotRegistry) -> None:
     """Register one instrument per catalog entry the snapshot can fill."""
     for descriptor in CATALOG:
-        callback = lambda options, descriptor=descriptor: _observations(registry, descriptor)
+        def callback(options, descriptor=descriptor):
+            return _observations(registry, descriptor)
+
         kwargs = {
             "name": descriptor.name,
             "callbacks": [callback],
