@@ -50,9 +50,12 @@ class JsonFileExporter:
 
     def export(self, snapshot) -> None:
         document = snapshot.to_canonical_dict()
-        self.documents.append(document)
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(json.dumps(self.documents, indent=2) + "\n")
+        documents = [*self.documents, document]
+        temporary = self._path.with_suffix(self._path.suffix + ".tmp")
+        temporary.write_text(json.dumps(documents, indent=2) + "\n")
+        temporary.replace(self._path)
+        self.documents.append(document)
 
     def close(self) -> None:
         return None
@@ -83,15 +86,20 @@ def test_recording_exporter_and_json_file_receive_the_same_snapshot(capsys):
         session.upsert(ds.id(1)).put({"n": 1}).execute()
 
         deadline = time.monotonic() + CALLBACK_TIMEOUT_SECONDS
+        document = None
         while time.monotonic() < deadline:
-            if recording.callbacks >= 1 and writer.documents:
-                break
+            if recording.callbacks >= 1 and writer.documents and _OUTPUT.is_file():
+                try:
+                    document = json.loads(_OUTPUT.read_text())[0]
+                except json.JSONDecodeError:
+                    document = None
+                else:
+                    break
             time.sleep(0.05)
         else:
             raise AssertionError("periodic scheduler did not call export()")
 
         record = recording.records[0]
-        document = json.loads(_OUTPUT.read_text())[0]
         assert record.client_type == "python-sdk"
         assert record.app_id == "telemetry-exporter-itest"
         assert record.node_names
