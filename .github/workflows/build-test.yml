@@ -1,0 +1,206 @@
+# Pull-request tests. Adapted from the client SDK's build-test workflow.
+#
+# The client SDK is pinned to a commit on CLIENT-OM-372. conn_type is on that
+# commit and is not in the published 1.0.0 release. This workflow does not
+# build or publish a wheel.
+
+name: CI Build & Test
+
+on:
+  pull_request:
+    branches:
+      - dev
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Pytest result files are stored on the run for later comparison.
+  actions: write
+  # OIDC token exchange with Artifactory (aerospike-native wheel).
+  id-token: write
+
+env:
+  # CLIENT-OM-372 at "docs(metrics): add exporter delivery examples".
+  SDK_REF: a9b9a897145e87a80671c86e47bfac37000cbff6
+
+jobs:
+  lint:
+    name: Ruff lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: python -m pip install ruff==0.15.12
+
+      - name: Ruff check
+        run: ruff check .
+
+  syntax-floor:
+    name: Python 3.11 syntax
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.11"
+
+      - name: Compile under the floor
+        run: python -m compileall -q aerospike_client_telemetry tests
+
+  unit:
+    name: Unit tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.14"]
+      fail-fast: false
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Checkout pinned client SDK
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: aerospike/aerospike-client-python-sdk
+          ref: ${{ env.SDK_REF }}
+          path: client-sdk
+
+      - name: Setup Python ${{ matrix.python }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Setup JFrog CLI
+        id: jfrog
+        uses: step-security/setup-jfrog-cli@3054b554c0fb4915b3d58847fb7730c593dbb934 # v5.0.0
+        env:
+          JF_PROJECT: ${{ vars.JFROG_PROJECT }}
+        with:
+          oidc-provider-name: ${{ vars.OIDC_PROVIDER_NAME || 'gh-aerospike' }}
+          oidc-audience: ${{ vars.OIDC_AUDIENCE || 'aerospike' }}
+
+      - name: Install pinned SDK and exporter
+        env:
+          JF_OIDC_USER: ${{ steps.jfrog.outputs.oidc-user }}
+          JF_OIDC_TOKEN: ${{ steps.jfrog.outputs.oidc-token }}
+        run: |
+          set -euo pipefail
+          user_enc=$(python -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['JF_OIDC_USER'], safe=''))")
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,otel]" ./client-sdk --only-binary aerospike-native \
+            --extra-index-url "https://${user_enc}:${JF_OIDC_TOKEN}@artifact.aerospike.io/artifactory/api/pypi/${{ vars.JFROG_PROJECT }}-pypi-dev-local/simple/"
+          python -c "import inspect, aerospike_sdk.metrics.snapshot as snapshot; assert 'conn_type' in inspect.getsource(snapshot), 'installed aerospike-sdk is not the pinned CLIENT-OM-372 commit'"
+
+      - name: Run unit tests
+        run: |
+          set -o pipefail
+          mkdir -p test-results
+          python -m pytest tests/unit -v --junitxml=test-results/junit.xml | tee test-results/pytest.log
+
+      - name: Upload unit results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unit-py${{ matrix.python }}
+          path: test-results/
+          retention-days: 90
+          if-no-files-found: warn
+
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Checkout pinned client SDK
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: aerospike/aerospike-client-python-sdk
+          ref: ${{ env.SDK_REF }}
+          path: client-sdk
+
+      - name: Setup Python 3.14
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.14"
+
+      - name: Setup JFrog CLI
+        id: jfrog
+        uses: step-security/setup-jfrog-cli@3054b554c0fb4915b3d58847fb7730c593dbb934 # v5.0.0
+        env:
+          JF_PROJECT: ${{ vars.JFROG_PROJECT }}
+        with:
+          oidc-provider-name: ${{ vars.OIDC_PROVIDER_NAME || 'gh-aerospike' }}
+          oidc-audience: ${{ vars.OIDC_AUDIENCE || 'aerospike' }}
+
+      - name: Install pinned SDK and exporter
+        env:
+          JF_OIDC_USER: ${{ steps.jfrog.outputs.oidc-user }}
+          JF_OIDC_TOKEN: ${{ steps.jfrog.outputs.oidc-token }}
+        run: |
+          set -euo pipefail
+          user_enc=$(python -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['JF_OIDC_USER'], safe=''))")
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,otel]" ./client-sdk --only-binary aerospike-native \
+            --extra-index-url "https://${user_enc}:${JF_OIDC_TOKEN}@artifact.aerospike.io/artifactory/api/pypi/${{ vars.JFROG_PROJECT }}-pypi-dev-local/simple/"
+          python -c "import inspect, aerospike_sdk.metrics.snapshot as snapshot; assert 'conn_type' in inspect.getsource(snapshot), 'installed aerospike-sdk is not the pinned CLIENT-OM-372 commit'"
+
+      # AEROSPIKE_HOST stays unset. The suite starts Enterprise 8.2.0.0, the
+      # second cluster, the collector, and Prometheus on its own.
+      - name: Run integration tests
+        run: |
+          set -o pipefail
+          mkdir -p test-results
+          python -m pytest tests/integration -v --junitxml=test-results/junit.xml | tee test-results/pytest.log
+
+      - name: Save container logs
+        if: failure()
+        run: |
+          mkdir -p test-results/containers
+          docker ps -a --filter label=com.docker.compose.project=aerospike-python-telemetry
+          for name in $(docker ps -aq --filter label=com.docker.compose.project=aerospike-python-telemetry); do
+            label=$(docker inspect --format '{{.Name}}' "$name" | sed 's#^/##')
+            docker logs --tail 200 "$name" > "test-results/containers/${label}.log" 2>&1 || true
+          done
+
+      - name: Upload integration results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: integration-py3.14
+          path: test-results/
+          retention-days: 90
+          if-no-files-found: warn

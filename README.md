@@ -71,6 +71,15 @@ instead. If that server advertises an address the client cannot reach, set
 register the exporter in `CUSTOM` mode and wait for the real scheduler. They
 do not call private timer methods.
 
+Pull requests to `dev` and `main` run `.github/workflows/build-test.yml`.
+That workflow lints with Ruff, compiles on Python 3.11, runs the unit tests
+on 3.11 and 3.14, and runs the integration tests on 3.14. It installs the
+client SDK from commit `a9b9a89` on `CLIENT-OM-372` and leaves
+`AEROSPIKE_HOST` unset, so the integration suite starts its own containers.
+Each test job uploads `junit.xml` and `pytest.log` to the Actions run for
+90 days. A failed integration run also uploads the container logs. The
+workflow does not publish a wheel.
+
 The same list is the test catalog in `SHARED_DESIGN.md` under
 `~/Downloads/om372_client_lib_python`. Open work is
 `~/Downloads/om372_client_lib_python/BACKLOG.md`.
