@@ -373,11 +373,38 @@ def iter_metric_points(
 ) -> Iterator[tuple[int | float, dict[str, str]]]:
     """Yield ``(value, extra labels)`` for one descriptor.
 
-    Latency bucket bounds are not computed here. Those descriptors are named
-    in the catalog, and a backend emits them once it can label each bucket.
+    Latency histograms are already bucketed by the client. The OTel API has no
+    observable histogram callback, so a compatible Prometheus-style
+    histogram is emitted as cumulative observable counters with an ``le``
+    label. Bucket boundaries are in the snapshot's latency unit.
     """
     source = descriptor.source
     if source.startswith("namespace.latency."):
+        group = source.rsplit(".", 1)[1]
+        shift = _number(document.get("latency_shift"))
+        base = 2 ** int(shift) if shift is not None else 2
+        for node in _mappings(document.get("nodes")):
+            node_labels = _node_labels(node)
+            for namespace in _mappings(node.get("namespaces")):
+                latency = namespace.get("latency") or {}
+                buckets = latency.get(group) if isinstance(latency, Mapping) else None
+                if not isinstance(buckets, (list, tuple)) or not buckets:
+                    continue
+                cumulative = 0
+                upper_bound = 1
+                for index, raw_count in enumerate(buckets):
+                    count = _number(raw_count)
+                    if count is None:
+                        continue
+                    cumulative += int(count)
+                    point = dict(node_labels)
+                    if namespace.get("name"):
+                        point["namespace"] = str(namespace["name"])
+                    point["le"] = (
+                        "+Inf" if index == len(buckets) - 1 else _format_latency_bound(upper_bound)
+                    )
+                    yield cumulative, point
+                    upper_bound *= base
         return
     if source == "usage":
         usage = document.get("usage") or {}
@@ -429,6 +456,11 @@ def _node_labels(node: Mapping[str, Any]) -> dict[str, str]:
     if node.get("port") is not None:
         labels["node_port"] = str(node["port"])
     return labels
+
+
+def _format_latency_bound(value: int) -> str:
+    """Prometheus-compatible spelling for an integral latency upper bound."""
+    return str(value)
 
 
 def _dig(value: Any, path: str) -> Any:

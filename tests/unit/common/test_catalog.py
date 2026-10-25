@@ -82,13 +82,30 @@ def test_client_app_ip_is_on_every_series(monkeypatch):
     assert series_attributes(document)["client_app_ip"] == "203.0.113.10"
 
 
-def test_latency_names_are_in_the_catalog_without_bucket_values():
+def test_latency_buckets_are_cumulative_observable_counters():
     document = _document()
     document["nodes"][0]["namespaces"][0]["latency"] = {"read": [1, 2, 3]}
     descriptor = CATALOG.by_source("namespace.latency.read")
     assert descriptor.name == "aerospike_client_namespace_latency_read_bucket"
     assert "le" in descriptor.labels
-    assert list(iter_metric_points(document, descriptor)) == []
+    assert list(iter_metric_points(document, descriptor)) == [
+        (1, {"node": "BB9", "node_address": "127.0.0.1", "node_port": "3000", "namespace": "test", "le": "1"}),
+        (3, {"node": "BB9", "node_address": "127.0.0.1", "node_port": "3000", "namespace": "test", "le": "2"}),
+        (6, {"node": "BB9", "node_address": "127.0.0.1", "node_port": "3000", "namespace": "test", "le": "+Inf"}),
+    ]
+
+
+def test_latency_shift_controls_histogram_upper_bounds():
+    document = _document()
+    document["latency_shift"] = 3
+    document["nodes"][0]["namespaces"][0]["latency"] = {"read": [1, 1, 1, 1]}
+    descriptor = CATALOG.by_source("namespace.latency.read")
+    assert [labels["le"] for _, labels in iter_metric_points(document, descriptor)] == [
+        "1",
+        "8",
+        "64",
+        "+Inf",
+    ]
 
 
 def test_reserved_and_non_mapping_labels_are_dropped():

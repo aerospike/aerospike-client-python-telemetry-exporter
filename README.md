@@ -65,7 +65,8 @@ register the exporter in `CUSTOM` mode and wait for the real scheduler. They
 do not call private timer methods.
 
 The same list is the test catalog in `SHARED_DESIGN.md` under
-`~/Downloads/om372_client_lib_python`.
+`~/Downloads/om372_client_lib_python`. Open work is
+`~/Downloads/om372_client_lib_python/BACKLOG.md`.
 
 ### Unit
 
@@ -130,8 +131,9 @@ gRPC. It inserts, upserts, and then reads by point query, bin projection,
 exists, header, batch, set scan, and filtered query. Snapshot latency
 totals match those calls: read, write, batch, and query. Prometheus
 `command_count` matches the calls except single-key `exists`, which the
-SDK fast path does not count. The five latency bucket names still do not
-arrive as their own series. With `-s`, the test prints the comparison.
+SDK fast path does not count. All five latency bucket families arrive as
+cumulative `_bucket` series with `le`; the `+Inf` bucket equals the
+corresponding snapshot total. With `-s`, the test prints the comparison.
 
 `tests/integration/otel/test_identity_defaults.py` — `app_id` is the name
 that keeps a client unique on one cluster. Omitting it stores `not-set`,

@@ -350,6 +350,17 @@ def _feature_count(series: list[dict], feature: str) -> float:
     return 0.0
 
 
+def _latency_bucket_count(series: list[dict], group: str, namespace_name: str, le: str) -> float:
+    name = f"aerospike_client_namespace_latency_{group}_bucket"
+    return sum(
+        float(sample["value"][1])
+        for sample in series
+        if sample["metric"].get("__name__") == name
+        and sample["metric"].get("namespace") == namespace_name
+        and sample["metric"].get("le") == le
+    )
+
+
 def _print_coverage(series: list[dict], document: dict, tally: _Tally, namespace_name: str) -> None:
     by_name: dict[str, list[dict]] = {}
     for sample in series:
@@ -509,17 +520,15 @@ def test_webapp_pushes_a_client_metric_to_the_collector(otel_collector, protocol
         assert _latency_count(document, "write", namespace_name) == tally.write_calls
         assert _latency_count(document, "batch", namespace_name) == tally.batch_calls
         assert _latency_count(document, "query", namespace_name) == tally.query_calls
+        assert _latency_bucket_count(series, "read", namespace_name, "+Inf") == tally.read_calls
+        assert _latency_bucket_count(series, "write", namespace_name, "+Inf") == tally.write_calls
+        assert _latency_bucket_count(series, "batch", namespace_name, "+Inf") == tally.batch_calls
+        assert _latency_bucket_count(series, "query", namespace_name, "+Inf") == tally.query_calls
 
         received = {sample["metric"].get("__name__") for sample in series}
         catalog_names = {descriptor.name for descriptor in CATALOG}
         missing = catalog_names - received
-        assert missing == {
-            "aerospike_client_namespace_latency_conn_bucket",
-            "aerospike_client_namespace_latency_read_bucket",
-            "aerospike_client_namespace_latency_write_bucket",
-            "aerospike_client_namespace_latency_batch_bucket",
-            "aerospike_client_namespace_latency_query_bucket",
-        }
+        assert missing == set()
         features = {
             sample["metric"].get("feature")
             for sample in series

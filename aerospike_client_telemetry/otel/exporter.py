@@ -80,8 +80,6 @@ def _observations(registry: ClientSnapshotRegistry, descriptor: MetricDescriptor
 def _register_instruments(meter: Any, registry: ClientSnapshotRegistry) -> None:
     """Register one instrument per catalog entry the snapshot can fill."""
     for descriptor in CATALOG:
-        if descriptor.source.startswith("namespace.latency."):
-            continue
         callback = lambda options, descriptor=descriptor: _observations(registry, descriptor)
         kwargs = {
             "name": descriptor.name,
