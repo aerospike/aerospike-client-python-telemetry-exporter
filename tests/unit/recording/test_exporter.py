@@ -30,7 +30,6 @@ def _document():
         "timestamp": "2026-01-01T00:00:00+00:00",
         "client_type": "python-sdk",
         "client_version": "1.0.0",
-        "conn_type": "sync",
         "cluster_name": "local",
         "app_id": "telemetry-exporter",
         "labels": {"owner": "platform"},
@@ -40,18 +39,16 @@ def _document():
         "latency_unit": "milliseconds",
         "latency_columns": 7,
         "latency_shift": 1,
-        "cluster": {
-            "connections": {"opened": 1, "closed": 0, "in_use": 0, "in_pool": 1},
-            "nodes": {"active": 1, "invalid": 0},
-            "command_count": 4,
-            "command_retries": 1,
-        },
+        "total_nodes": 1,
+        "invalid_node_count": 0,
+        "command_count": 4,
+        "command_retries": 1,
         "nodes": [
             {
-                "name": "BB9",
-                "address": "127.0.0.1",
-                "port": 3100,
-                "namespaces": [{"name": "test", "errors": 0}],
+                "node_name": "BB9",
+                "node_address": "127.0.0.1",
+                "node_port": 3100,
+                "namespaces": [{"namespace": "test", "errors": 0}],
             }
         ],
         "nodes_departed": [],
@@ -114,15 +111,14 @@ def test_translate_snapshot_reads_without_mutating():
 
     assert document == original
     assert record.client_type == "python-sdk"
-    assert record.conn_type == "sync"
     assert record.app_id == "telemetry-exporter"
     assert record.node_names == ("BB9",)
     assert record.command_count == 4
     assert record.labels["cluster"] == "local"
     assert record.labels["owner"] == "platform"
     assert "cluster_name" not in record.labels
-    document["nodes"].append({"name": "later"})
-    document["cluster"]["command_count"] = 99
+    document["nodes"].append({"node_name": "later"})
+    document["command_count"] = 99
     assert record.node_names == ("BB9",)
     assert record.command_count == 4
 

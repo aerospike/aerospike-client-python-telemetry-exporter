@@ -64,7 +64,7 @@ RESERVED_LABELS = frozenset(
     }
 )
 
-_IDENTITY = ("client_type", "client_version", "conn_type", "cluster_name", "app_id")
+_IDENTITY = ("client_type", "client_version", "cluster_name", "app_id")
 _CLIENT_APP_IP_LABEL = "client_app_ip"
 _client_app_ip = ""
 _NODE_LABELS = ("node", "node_address", "node_port")
@@ -105,56 +105,50 @@ def _counter(
 
 def _metrics() -> dict[str, MetricDescriptor]:
     metrics = {
-        "cluster.recover_queue.size": _gauge(
-            "cluster.recover_queue.size",
+        "recover_queue_size": _gauge(
+            "recover_queue_size",
             "aerospike_client_recover_queue_size",
             "Connections waiting in the recovery queue",
             "{connection}",
         ),
-        "cluster.nodes.invalid": _gauge(
-            "cluster.nodes.invalid",
+        "invalid_node_count": _gauge(
+            "invalid_node_count",
             "aerospike_client_invalid_node_count",
             "Nodes the client currently treats as invalid",
             "{node}",
         ),
-        "cluster.command_retries": _counter(
-            "cluster.command_retries",
+        "command_retries": _counter(
+            "command_retries",
             "aerospike_client_retry_count",
             "Transaction retries",
             "{retry}",
         ),
-        "cluster.nodes.active": _gauge(
-            "cluster.nodes.active",
+        "total_nodes": _gauge(
+            "total_nodes",
             "aerospike_client_total_nodes",
             "Current cluster node count",
             "{node}",
         ),
-        "cluster.command_timeout_client": _counter(
-            "cluster.command_timeout_client",
-            "aerospike_client_command_timeout_client",
-            "Commands the client gave up on",
-            "{command}",
+        "open_connections": _gauge(
+            "open_connections",
+            "aerospike_client_open_connections",
+            "Connections currently open across the cluster",
+            "{connection}",
         ),
-        "cluster.command_timeout_server": _counter(
-            "cluster.command_timeout_server",
-            "aerospike_client_command_timeout_server",
-            "Commands the server reported as timed out",
-            "{command}",
-        ),
-        "cluster.cpu_percent": _gauge(
-            "cluster.cpu_percent",
+        "cpu_percent": _gauge(
+            "cpu_percent",
             "aerospike_client_cpu_percent",
             "Client process CPU utilization",
             "%",
         ),
-        "cluster.memory_bytes": _gauge(
-            "cluster.memory_bytes",
+        "memory_bytes": _gauge(
+            "memory_bytes",
             "aerospike_client_memory_bytes",
             "Client process memory usage",
             "By",
         ),
-        "cluster.command_count": _counter(
-            "cluster.command_count",
+        "command_count": _counter(
+            "command_count",
             "aerospike_client_command_count",
             "Commands issued by the client",
             "{command}",
@@ -187,6 +181,27 @@ def _metrics() -> dict[str, MetricDescriptor]:
             "{connection}",
             _NODE_LABELS,
         ),
+        "node.connection_open_failure": _counter(
+            "node.connection_open_failure",
+            "aerospike_client_node_connection_open_failure",
+            "Connection open failures on an existing node",
+            "{error}",
+            _NODE_LABELS,
+        ),
+        "node.connection_tls_handshake_failure": _counter(
+            "node.connection_tls_handshake_failure",
+            "aerospike_client_node_connection_tls_handshake_failure",
+            "TLS handshake failures on an existing node",
+            "{error}",
+            _NODE_LABELS,
+        ),
+        "node.connection_auth_failure": _counter(
+            "node.connection_auth_failure",
+            "aerospike_client_node_connection_auth_failure",
+            "Authentication failures on an existing node",
+            "{error}",
+            _NODE_LABELS,
+        ),
         "namespace.errors": _counter(
             "namespace.errors",
             "aerospike_client_namespace_errors",
@@ -194,10 +209,10 @@ def _metrics() -> dict[str, MetricDescriptor]:
             "{error}",
             _NAMESPACE_LABELS,
         ),
-        "namespace.timeouts": _counter(
-            "namespace.timeouts",
-            "aerospike_client_namespace_timeouts",
-            "Namespace operation timeouts",
+        "namespace.server_timeouts": _counter(
+            "namespace.server_timeouts",
+            "aerospike_client_namespace_server_timeouts",
+            "Namespace operation timeouts reported by the server",
             "{timeout}",
             _NAMESPACE_LABELS,
         ),
@@ -244,7 +259,22 @@ def _metrics() -> dict[str, MetricDescriptor]:
             ("feature",),
         ),
     }
-    for operation in ("conn", "read", "write", "batch", "query"):
+    metrics["node.latency.conn"] = _counter(
+        "node.latency.conn",
+        "aerospike_client_node_latency_conn_bucket",
+        "Cumulative node connection-acquisition latency observations by upper bound",
+        "{operation}",
+        _NODE_LABELS + ("le",),
+    )
+    for operation in ("read", "write", "batch", "query"):
+        source = f"cluster.latency.{operation}"
+        metrics[source] = _counter(
+            source,
+            f"aerospike_client_cluster_latency_{operation}_bucket",
+            f"Cumulative whole-call {operation} latency observations by upper bound",
+            "{operation}",
+            ("le",),
+        )
         source = f"namespace.latency.{operation}"
         metrics[source] = _counter(
             source,
@@ -379,32 +409,34 @@ def iter_metric_points(
     label. Bucket boundaries are in the snapshot's latency unit.
     """
     source = descriptor.source
+    if source.startswith("cluster.latency."):
+        group = source.rsplit(".", 1)[1]
+        buckets = _latency_buckets(document.get("cluster_latencies"), group)
+        yield from _bucket_points(document, buckets, {})
+        return
+    if source == "node.latency.conn":
+        for node in _mappings(document.get("nodes")):
+            histogram = node.get("conn_latency")
+            buckets = (
+                histogram.get("bucket_counts")
+                if isinstance(histogram, Mapping) and histogram.get("type") == "conn"
+                else None
+            )
+            yield from _bucket_points(document, buckets, _node_labels(node))
+        return
     if source.startswith("namespace.latency."):
         group = source.rsplit(".", 1)[1]
-        shift = _number(document.get("latency_shift"))
-        base = 2 ** int(shift) if shift is not None else 2
         for node in _mappings(document.get("nodes")):
             node_labels = _node_labels(node)
             for namespace in _mappings(node.get("namespaces")):
-                latency = namespace.get("latency") or {}
-                buckets = latency.get(group) if isinstance(latency, Mapping) else None
-                if not isinstance(buckets, (list, tuple)) or not buckets:
-                    continue
-                cumulative = 0
-                upper_bound = 1
-                for index, raw_count in enumerate(buckets):
-                    count = _number(raw_count)
-                    if count is None:
-                        continue
-                    cumulative += int(count)
-                    point = dict(node_labels)
-                    if namespace.get("name"):
-                        point["namespace"] = str(namespace["name"])
-                    point["le"] = (
-                        "+Inf" if index == len(buckets) - 1 else _format_latency_bound(upper_bound)
-                    )
-                    yield cumulative, point
-                    upper_bound *= base
+                point = dict(node_labels)
+                if namespace.get("namespace"):
+                    point["namespace"] = str(namespace["namespace"])
+                yield from _bucket_points(
+                    document,
+                    _latency_buckets(namespace.get("latencies"), group),
+                    point,
+                )
         return
     if source == "usage":
         usage = document.get("usage") or {}
@@ -423,8 +455,8 @@ def iter_metric_points(
                 if number is None:
                     continue
                 point = dict(extra)
-                if namespace.get("name"):
-                    point["namespace"] = str(namespace["name"])
+                if namespace.get("namespace"):
+                    point["namespace"] = str(namespace["namespace"])
                 yield number, point
         return
     if source.startswith("node."):
@@ -435,10 +467,9 @@ def iter_metric_points(
                 continue
             yield number, _node_labels(node)
         return
-    if source.startswith("cluster."):
-        number = _number(_dig(document.get("cluster") or {}, source.split(".", 1)[1]))
-        if number is not None:
-            yield number, {}
+    number = _number(_dig(document, source))
+    if number is not None:
+        yield number, {}
 
 
 def _mappings(value: Any) -> Iterator[Mapping[str, Any]]:
@@ -449,13 +480,44 @@ def _mappings(value: Any) -> Iterator[Mapping[str, Any]]:
 
 def _node_labels(node: Mapping[str, Any]) -> dict[str, str]:
     labels: dict[str, str] = {}
-    if node.get("name"):
-        labels["node"] = str(node["name"])
-    if node.get("address"):
-        labels["node_address"] = str(node["address"])
-    if node.get("port") is not None:
-        labels["node_port"] = str(node["port"])
+    if node.get("node_name"):
+        labels["node"] = str(node["node_name"])
+    if node.get("node_address"):
+        labels["node_address"] = str(node["node_address"])
+    if node.get("node_port") is not None:
+        labels["node_port"] = str(node["node_port"])
     return labels
+
+
+def _latency_buckets(latencies: Any, group: str) -> Any:
+    for latency in _mappings(latencies):
+        if latency.get("type") == group:
+            return latency.get("bucket_counts")
+    return None
+
+
+def _bucket_points(
+    document: Mapping[str, Any],
+    buckets: Any,
+    labels: Mapping[str, str],
+) -> Iterator[tuple[int, dict[str, str]]]:
+    if not isinstance(buckets, (list, tuple)) or not buckets:
+        return
+    shift = _number(document.get("latency_shift"))
+    base = 2 ** int(shift) if shift is not None else 2
+    cumulative = 0
+    upper_bound = 1
+    for index, raw_count in enumerate(buckets):
+        count = _number(raw_count)
+        if count is None:
+            continue
+        cumulative += int(count)
+        point = dict(labels)
+        point["le"] = (
+            "+Inf" if index == len(buckets) - 1 else _format_latency_bound(upper_bound)
+        )
+        yield cumulative, point
+        upper_bound *= base
 
 
 def _format_latency_bound(value: int) -> str:

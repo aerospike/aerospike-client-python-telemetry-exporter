@@ -12,10 +12,12 @@
 
 """A webapp meter provider across enable and disable.
 
-``OtelExporter(meter_provider=...)`` registers instruments on that provider.
-It does not start a reader and it does not open OTLP. ``enable_metrics`` and
+``OtelExporter(provider)`` registers instruments on that provider.
+It does not start a reader and it does not open OTLP. The webapp records its
+own instruments on the same provider. ``enable_metrics`` and
 ``disable_metrics`` start and stop the Aerospike export thread. The provider
-keeps reporting the last document while that thread is stopped.
+keeps reporting the last client document while that thread is stopped, and
+the webapp instruments keep recording.
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ from aerospike_sdk.sync import ClusterDefinition
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
-from aerospike_client_telemetry.otel import OtelExporter, OtelExporterConfig
+from aerospike_client_telemetry.otel import OtelExporter
 from tests.integration.support import (
     CALLBACK_TIMEOUT_SECONDS,
     EXPORT_INTERVAL_SECONDS,
@@ -90,35 +92,71 @@ def _write(cluster, dataset) -> None:
         session.upsert(dataset.id(i)).put({"n": i}).execute()
 
 
-def test_passed_meter_provider_survives_enable_and_disable(monkeypatch):
+def _running_provider(monkeypatch):
     http = pytest.importorskip("opentelemetry.exporter.otlp.proto.http.metric_exporter")
     grpc = pytest.importorskip("opentelemetry.exporter.otlp.proto.grpc.metric_exporter")
     monkeypatch.setattr(http.OTLPMetricExporter, "__init__", _reject_otlp)
     monkeypatch.setattr(grpc.OTLPMetricExporter, "__init__", _reject_otlp)
-
     reader = InMemoryMetricReader()
-    provider = MeterProvider(metric_readers=[reader])
-    exporter = OtelExporter(
-        OtelExporterConfig(endpoint="http://127.0.0.1:4318/v1/metrics"),
-        meter_provider=provider,
-    )
-    assert exporter.owns_provider is False
-    assert exporter.meter_provider is provider
-    assert list(provider._metric_readers) == [reader]
+    return reader, MeterProvider(metric_readers=[reader])
 
+
+def _webapp_instruments(provider):
+    """Instruments the webapp owns on the same provider as the client exporter."""
+    orders = provider.get_meter("orders")
+    return orders.create_counter("orders_placed"), orders.create_gauge("orders_backlog")
+
+
+def _collected(reader: InMemoryMetricReader) -> dict[str, tuple[str, float]]:
+    data = reader.get_metrics_data()
+    found: dict[str, tuple[str, float]] = {}
+    if data is None:
+        return found
+    for resource in data.resource_metrics:
+        for scope_metrics in resource.scope_metrics:
+            scope_name = scope_metrics.scope.name
+            for metric in scope_metrics.metrics:
+                points = list(metric.data.data_points)
+                if points:
+                    found[metric.name] = (scope_name, float(points[0].value))
+    return found
+
+
+def _wait_for_client_count(reader: InMemoryMetricReader, predicate) -> dict[str, tuple[str, float]]:
+    deadline = time.monotonic() + CALLBACK_TIMEOUT_SECONDS
+    last = None
+    while time.monotonic() < deadline:
+        collected = _collected(reader)
+        client = collected.get("aerospike_client_command_count")
+        last = None if client is None else client[1]
+        if last is not None and predicate(last):
+            return collected
+        time.sleep(0.05)
+    raise AssertionError(f"aerospike_client_command_count is {last}")
+
+
+def _connect(app_id: str, exporter: OtelExporter, provider: MeterProvider):
     host, port = seed_host()
-    definition = (
-        ClusterDefinition(host, port)
-        .app_id("passed-provider")
-        .with_system_settings(custom_metrics_settings())
-    )
-    cluster = None
     try:
-        cluster = definition.connect()
+        return (
+            ClusterDefinition(host, port)
+            .app_id(app_id)
+            .with_system_settings(custom_metrics_settings())
+            .connect()
+        )
     except Exception as exc:
         exporter.close()
         provider.shutdown()
         pytest.skip(f"Aerospike seed {host}:{port} unavailable: {exc}")
+
+
+def test_passed_meter_provider_survives_enable_and_disable(monkeypatch):
+    reader, provider = _running_provider(monkeypatch)
+    exporter = OtelExporter(provider)
+    assert exporter.meter_provider is provider
+    assert list(provider._metric_readers) == [reader]
+
+    cluster = _connect("passed-provider", exporter, provider)
 
     dataset = DataSet.of(namespace(), "passed_provider")
     try:
@@ -157,4 +195,72 @@ def test_passed_meter_provider_survives_enable_and_disable(monkeypatch):
     finally:
         if cluster is not None:
             cluster.close()
+        provider.shutdown()
+
+
+def test_webapp_metrics_and_client_metrics_share_the_provider(monkeypatch):
+    reader, provider = _running_provider(monkeypatch)
+    placed, backlog = _webapp_instruments(provider)
+    exporter = OtelExporter(provider)
+    cluster = _connect("shared-provider", exporter, provider)
+    dataset = DataSet.of(namespace(), "shared_provider")
+    try:
+        placed.add(2)
+        backlog.set(4)
+        cluster.add_exporter(exporter)
+        cluster.enable_metrics(metrics_policy())
+        _write(cluster, dataset)
+        collected = _wait_for_client_count(reader, lambda value: value >= 1)
+        assert collected["orders_placed"] == ("orders", 2)
+        assert collected["orders_backlog"] == ("orders", 4)
+        scope, value = collected["aerospike_client_command_count"]
+        assert scope == "aerospike.client"
+        assert value >= 1
+    finally:
+        cluster.disable_metrics()
+        cluster.close()
+        exporter.close()
+        provider.shutdown()
+
+
+def test_webapp_metrics_continue_while_client_metrics_are_disabled(monkeypatch):
+    reader, provider = _running_provider(monkeypatch)
+    placed, backlog = _webapp_instruments(provider)
+    exporter = OtelExporter(provider)
+    cluster = _connect("webapp-while-disabled", exporter, provider)
+    dataset = DataSet.of(namespace(), "webapp_while_disabled")
+    try:
+        placed.add(2)
+        backlog.set(4)
+        cluster.add_exporter(exporter)
+        cluster.enable_metrics(metrics_policy())
+        _write(cluster, dataset)
+        collected = _wait_for_client_count(reader, lambda value: value >= 1)
+        client = collected["aerospike_client_command_count"][1]
+        assert collected["orders_placed"] == ("orders", 2)
+        assert collected["orders_backlog"] == ("orders", 4)
+
+        cluster.disable_metrics()
+        assert cluster.metrics_enabled() is False
+        placed.add(3)
+        backlog.set(9)
+        _write(cluster, dataset)
+        time.sleep(EXPORT_INTERVAL_SECONDS * 2.5)
+        held = _collected(reader)
+        assert held["aerospike_client_command_count"] == ("aerospike.client", client)
+        assert held["orders_placed"] == ("orders", 5)
+        assert held["orders_backlog"] == ("orders", 9)
+
+        cluster.enable_metrics(metrics_policy())
+        placed.add(1)
+        _write(cluster, dataset)
+        resumed = _wait_for_client_count(reader, lambda value: value > client)
+        assert resumed["orders_placed"] == ("orders", 6)
+        assert resumed["orders_backlog"] == ("orders", 9)
+        assert resumed["aerospike_client_command_count"][0] == "aerospike.client"
+    finally:
+        cluster.disable_metrics()
+        cluster.close()
+        exporter.close()
+        assert provider._shutdown is False
         provider.shutdown()

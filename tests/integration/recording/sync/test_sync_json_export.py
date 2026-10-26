@@ -107,9 +107,9 @@ def test_recording_exporter_and_json_file_receive_the_same_snapshot(capsys):
         assert document["app_id"] == record.app_id
         assert document["operational_metrics_enabled"] is True
         assert document["usage_metrics_enabled"] is True
-        assert document["cluster"]["command_count"] >= 1
-        assert document["usage"]["feature.api.blocking"] >= 1
-        assert document["usage"]["feature.shape.point"] >= 1
+        assert document["command_count"] >= 1
+        assert document["usage"]["blocking"] >= 1
+        assert document["usage"]["shape_point"] >= 1
         with capsys.disabled():
             print(f"wrote {_OUTPUT}")
     finally:

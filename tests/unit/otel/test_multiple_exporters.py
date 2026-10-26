@@ -12,7 +12,8 @@
 
 """Two OTel exporters, and one exporter receiving two publishes."""
 
-from aerospike_client_telemetry.otel import OtelExporter, OtelExporterConfig
+from aerospike_client_telemetry.otel import OtelExporter
+from tests.fake_provider import RecordingProvider
 
 
 class _Snapshot:
@@ -23,32 +24,24 @@ class _Snapshot:
         return self.document
 
 
-def _config(service_name: str) -> OtelExporterConfig:
-    return OtelExporterConfig(
-        service_name=service_name,
-        endpoint=f"http://127.0.0.1:4318/v1/metrics/{service_name}",
-    )
-
-
 def _document(marker: str) -> dict:
     return {
         "client_type": "python-sdk",
         "client_version": "1.0.0",
-        "conn_type": "sync",
         "cluster_name": "local",
         "app_id": "orders-service",
         "marker": marker,
     }
 
 
-_KEY = "python-sdk\n1.0.0\nsync\nlocal\norders-service"
+_KEY = "python-sdk\n1.0.0\nlocal\norders-service"
 
 
 def test_two_exporters_keep_separate_registries():
     document = _document("shared")
     snapshot = _Snapshot(document)
-    orders = OtelExporter(_config("orders"))
-    billing = OtelExporter(_config("billing"))
+    orders = OtelExporter(RecordingProvider())
+    billing = OtelExporter(RecordingProvider())
 
     try:
         orders.export(snapshot)
@@ -56,8 +49,7 @@ def test_two_exporters_keep_separate_registries():
 
         assert orders is not billing
         assert orders.registry is not billing.registry
-        assert orders.config.service_name == "orders"
-        assert billing.config.service_name == "billing"
+        assert orders.meter_provider is not billing.meter_provider
         assert orders.registry.current(_KEY) is document
         assert billing.registry.current(_KEY) is document
         assert orders.registry.client_keys() == (_KEY,)
@@ -68,7 +60,7 @@ def test_two_exporters_keep_separate_registries():
 
 
 def test_two_publishes_on_one_exporter_keep_the_latest_document():
-    exporter = OtelExporter(_config("orders"))
+    exporter = OtelExporter(RecordingProvider())
     try:
         exporter.export(_Snapshot(_document("first")))
         latest = _document("second")

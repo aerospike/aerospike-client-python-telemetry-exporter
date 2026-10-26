@@ -12,28 +12,15 @@
 
 """OpenTelemetry backend.
 
-:class:`~aerospike_client_telemetry.otel.config.OtelExporterConfig` is the resolved
-settings object. :class:`~aerospike_client_telemetry.otel.exporter.OtelExporter` and
-:class:`~aerospike_client_telemetry.otel.exporter.AsyncOtelExporter` are the sync and
-async client exporters. Neither is constructed here: importing this package
-does not import OpenTelemetry. Install the ``otel`` extra before constructing
-an exporter that creates its own meter provider. A webapp that passes its
-meter provider in does not need this package to import OpenTelemetry.
+:class:`~aerospike_client_telemetry.otel.exporter.OtelExporter` and
+:class:`~aerospike_client_telemetry.otel.exporter.AsyncOtelExporter` register
+instruments on a meter provider the webapp supplies. Importing this package
+does not import OpenTelemetry. The webapp's provider is what imports it.
 """
 
-from aerospike_client_telemetry.otel.config import (
-    Compression,
-    OtelExporterConfig,
-    Protocol,
-    Temporality,
-)
 from aerospike_client_telemetry.otel.exporter import AsyncOtelExporter, OtelExporter
 
 __all__ = [
     "AsyncOtelExporter",
-    "Compression",
     "OtelExporter",
-    "OtelExporterConfig",
-    "Protocol",
-    "Temporality",
 ]

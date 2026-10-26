@@ -27,18 +27,18 @@ def _document():
     return {
         "client_type": "python-sdk",
         "client_version": "1.0.0",
-        "conn_type": "sync",
         "cluster_name": "local",
         "app_id": "orders-service",
         "labels": {"environment": "prod", "cluster_name": "spoofed", "region": "us-west"},
-        "cluster": {"command_count": 4, "nodes": {"active": 1}},
+        "command_count": 4,
+        "total_nodes": 1,
         "nodes": [
             {
-                "name": "BB9",
-                "address": "127.0.0.1",
-                "port": 3000,
+                "node_name": "BB9",
+                "node_address": "127.0.0.1",
+                "node_port": 3000,
                 "connections": {"opened": 2},
-                "namespaces": [{"name": "test", "errors": 7}],
+                "namespaces": [{"namespace": "test", "errors": 7}],
             }
         ],
     }
@@ -47,7 +47,7 @@ def _document():
 def test_one_label_rename_applies_to_every_metric():
     document = _document()
     label_map = {"region": "location", "cluster_name": "cluster"}
-    command = CATALOG.by_source("cluster.command_count")
+    command = CATALOG.by_source("command_count")
     errors = CATALOG.by_source("namespace.errors")
 
     command_labels = series_attributes(document, label_map=label_map)
@@ -64,7 +64,7 @@ def test_one_label_rename_applies_to_every_metric():
     assert error_labels["node"] == "BB9"
     assert error_value == 7
     assert command.kind is InstrumentKind.COUNTER
-    assert CATALOG.by_source("cluster.nodes.active").kind is InstrumentKind.GAUGE
+    assert CATALOG.by_source("total_nodes").kind is InstrumentKind.GAUGE
 
 
 def test_client_app_ip_is_on_every_series(monkeypatch):
@@ -85,27 +85,93 @@ def test_client_app_ip_is_on_every_series(monkeypatch):
 
 def test_latency_buckets_are_cumulative_observable_counters():
     document = _document()
-    document["nodes"][0]["namespaces"][0]["latency"] = {"read": [1, 2, 3]}
+    document["nodes"][0]["namespaces"][0]["latencies"] = [
+        {"type": "read", "bucket_counts": [1, 2, 3]}
+    ]
     descriptor = CATALOG.by_source("namespace.latency.read")
     assert descriptor.name == "aerospike_client_namespace_latency_read_bucket"
     assert "le" in descriptor.labels
+    labels = {
+        "node": "BB9",
+        "node_address": "127.0.0.1",
+        "node_port": "3000",
+        "namespace": "test",
+    }
     assert list(iter_metric_points(document, descriptor)) == [
-        (1, {"node": "BB9", "node_address": "127.0.0.1", "node_port": "3000", "namespace": "test", "le": "1"}),
-        (3, {"node": "BB9", "node_address": "127.0.0.1", "node_port": "3000", "namespace": "test", "le": "2"}),
-        (6, {"node": "BB9", "node_address": "127.0.0.1", "node_port": "3000", "namespace": "test", "le": "+Inf"}),
+        (1, {**labels, "le": "1"}),
+        (3, {**labels, "le": "2"}),
+        (6, {**labels, "le": "+Inf"}),
     ]
 
 
 def test_latency_shift_controls_histogram_upper_bounds():
     document = _document()
     document["latency_shift"] = 3
-    document["nodes"][0]["namespaces"][0]["latency"] = {"read": [1, 1, 1, 1]}
+    document["nodes"][0]["namespaces"][0]["latencies"] = [
+        {"type": "read", "bucket_counts": [1, 1, 1, 1]}
+    ]
     descriptor = CATALOG.by_source("namespace.latency.read")
     assert [labels["le"] for _, labels in iter_metric_points(document, descriptor)] == [
         "1",
         "8",
         "64",
         "+Inf",
+    ]
+
+
+def test_cluster_and_node_latency_use_their_revised_scopes():
+    document = _document()
+    document["cluster_latencies"] = [
+        {"type": "read", "bucket_counts": [2, 3], "count": 5}
+    ]
+    document["nodes"][0]["conn_latency"] = {
+        "type": "conn",
+        "bucket_counts": [4, 1],
+        "count": 5,
+    }
+
+    cluster = CATALOG.by_source("cluster.latency.read")
+    node = CATALOG.by_source("node.latency.conn")
+
+    assert list(iter_metric_points(document, cluster)) == [
+        (2, {"le": "1"}),
+        (5, {"le": "+Inf"}),
+    ]
+    assert list(iter_metric_points(document, node)) == [
+        (
+            4,
+            {
+                "node": "BB9",
+                "node_address": "127.0.0.1",
+                "node_port": "3000",
+                "le": "1",
+            },
+        ),
+        (
+            5,
+            {
+                "node": "BB9",
+                "node_address": "127.0.0.1",
+                "node_port": "3000",
+                "le": "+Inf",
+            },
+        ),
+    ]
+
+
+def test_existing_node_connection_failures_are_mapped():
+    document = _document()
+    document["nodes"][0]["connection_open_failure"] = 3
+    descriptor = CATALOG.by_source("node.connection_open_failure")
+    assert list(iter_metric_points(document, descriptor)) == [
+        (
+            3,
+            {
+                "node": "BB9",
+                "node_address": "127.0.0.1",
+                "node_port": "3000",
+            },
+        )
     ]
 
 
@@ -131,8 +197,10 @@ def test_reserved_and_non_mapping_labels_are_dropped():
     assert labels["app_id"] == "orders-service"
     assert labels["client_type"] == "python-sdk"
     assert labels["client_version"] == "1.0.0"
-    assert labels["conn_type"] == "sync"
-    for dropped in ("node", "namespace", "feature", "le", "node_address", "node_port"):
+    for dropped in (
+        "node", "namespace", "feature", "le",
+        "node_address", "node_port", "conn_type",
+    ):
         assert dropped not in labels
 
     document["labels"] = ["environment:prod"]
@@ -143,21 +211,24 @@ def test_missing_names_omit_the_label_and_duplicate_names_both_yield():
     document = _document()
     document["nodes"] = [
         {
-            "name": "",
-            "address": "127.0.0.1",
-            "port": 3000,
-            "namespaces": [{"name": "", "errors": 1}, {"name": "test", "errors": 2}],
+            "node_name": "",
+            "node_address": "127.0.0.1",
+            "node_port": 3000,
+            "namespaces": [
+                {"namespace": "", "errors": 1},
+                {"namespace": "test", "errors": 2},
+            ],
         },
         {
-            "name": "BB9",
-            "address": "10.0.0.1",
-            "port": 3000,
+            "node_name": "BB9",
+            "node_address": "10.0.0.1",
+            "node_port": 3000,
             "connections": {"opened": 3},
         },
         {
-            "name": "BB9",
-            "address": "10.0.0.2",
-            "port": 3000,
+            "node_name": "BB9",
+            "node_address": "10.0.0.2",
+            "node_port": 3000,
             "connections": {"opened": 4},
         },
     ]
@@ -178,25 +249,29 @@ def test_departed_nodes_rollups_and_non_numbers_are_omitted():
     document = _document()
     document["nodes"] = []
     document["nodes_departed"] = [
-        {"name": "gone", "address": "10.0.0.9", "port": 3000, "connections": {"opened": 8}}
+        {
+            "node_name": "gone",
+            "node_address": "10.0.0.9",
+            "node_port": 3000,
+            "connections": {"opened": 8},
+        }
     ]
-    document["cluster"]["connections"] = {"opened": 11}
-    document["cluster"]["command_count"] = "4"
-    document["cluster"]["nodes"]["active"] = True
-    document["cluster"].pop("command_retries", None)
+    document["command_count"] = "4"
+    document["total_nodes"] = True
+    document.pop("command_retries", None)
 
     opened = CATALOG.by_source("node.connections.opened")
     assert list(iter_metric_points(document, opened)) == []
-    assert list(iter_metric_points(document, CATALOG.by_source("cluster.command_count"))) == []
-    assert list(iter_metric_points(document, CATALOG.by_source("cluster.nodes.active"))) == []
-    assert list(iter_metric_points(document, CATALOG.by_source("cluster.command_retries"))) == []
+    assert list(iter_metric_points(document, CATALOG.by_source("command_count"))) == []
+    assert list(iter_metric_points(document, CATALOG.by_source("total_nodes"))) == []
+    assert list(iter_metric_points(document, CATALOG.by_source("command_retries"))) == []
 
 
 def test_unmapped_snapshot_fields_have_no_descriptor():
     for source in (
         "node.connections.open_failure",
         "node.error_rate",
-        "cluster.connections.opened",
+        "delay_queue_timeout_count",
         "nodes_departed",
     ):
         with pytest.raises(KeyError):
@@ -206,9 +281,9 @@ def test_unmapped_snapshot_fields_have_no_descriptor():
 def test_registry_keeps_the_latest_document_for_an_identity():
     registry = ClientSnapshotRegistry()
     key = "python-sdk\n1.0.0\nlocal\norders-service"
-    registry.replace(key, {"labels": {"region": "us-west"}, "cluster": {"command_count": 1}})
-    registry.replace(key, {"labels": {"region": "eu"}, "cluster": {"command_count": 2}})
+    registry.replace(key, {"labels": {"region": "us-west"}, "command_count": 1})
+    registry.replace(key, {"labels": {"region": "eu"}, "command_count": 2})
 
     assert registry.client_keys() == (key,)
     assert registry.current(key)["labels"] == {"region": "eu"}
-    assert registry.current(key)["cluster"]["command_count"] == 2
+    assert registry.current(key)["command_count"] == 2

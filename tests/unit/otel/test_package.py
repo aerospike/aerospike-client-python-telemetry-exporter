@@ -13,22 +13,14 @@
 """The OTel package is importable before the OpenTelemetry extra is installed."""
 
 import sys
-from datetime import timedelta
 
 import pytest
 
 from aerospike_sdk.metrics.export import check_exporter
 from aerospike_client_telemetry.common import MetricCatalog
 from aerospike_client_telemetry.common.catalog import InstrumentKind, MetricDescriptor
-from aerospike_client_telemetry.otel import (
-    AsyncOtelExporter,
-    Compression,
-    OtelExporter,
-    OtelExporterConfig,
-    Protocol,
-    Temporality,
-)
-from aerospike_client_telemetry.otel.config import OtelExporterConfig as ConfigFromModule
+from aerospike_client_telemetry.otel import AsyncOtelExporter, OtelExporter
+from tests.fake_provider import RecordingProvider
 
 
 def test_importing_otel_does_not_import_opentelemetry():
@@ -39,7 +31,8 @@ def test_importing_otel_does_not_import_opentelemetry():
             sys.executable,
             "-c",
             "import sys; import aerospike_client_telemetry.otel; "
-            "assert not any(name == 'opentelemetry' or name.startswith('opentelemetry.') for name in sys.modules)",
+            "assert not any(name == 'opentelemetry' or "
+            "name.startswith('opentelemetry.') for name in sys.modules)",
         ],
         check=False,
         capture_output=True,
@@ -52,36 +45,6 @@ def test_root_package_does_not_export_the_otel_backend():
     import aerospike_client_telemetry
 
     assert "OtelExporter" not in aerospike_client_telemetry.__all__
-
-
-def test_config_is_immutable_and_copies_headers():
-    headers = {"authorization": "secret"}
-    config = OtelExporterConfig(
-        service_name="checkout",
-        endpoint="http://127.0.0.1:4318/v1/metrics",
-        protocol="http/protobuf",
-        headers=headers,
-        timeout=timedelta(seconds=5),
-        compression=Compression.GZIP,
-        temporality="cumulative",
-    )
-    headers["authorization"] = "changed"
-    assert config.headers == {"authorization": "secret"}
-    assert config.protocol is Protocol.HTTP_PROTOBUF
-    assert config.temporality is Temporality.CUMULATIVE
-    assert isinstance(config, ConfigFromModule)
-    empty = OtelExporterConfig()
-    assert empty.service_name == ""
-    assert empty.endpoint == ""
-    assert empty.temporality is None
-    with pytest.raises(ValueError, match="timeout"):
-        OtelExporterConfig(service_name="checkout", endpoint="http://127.0.0.1:4318", timeout=timedelta(0))
-    with pytest.raises(ValueError, match="export_interval"):
-        OtelExporterConfig(
-            service_name="checkout",
-            endpoint="http://127.0.0.1:4318",
-            export_interval=timedelta(0),
-        )
 
 
 class _Snapshot:
@@ -97,16 +60,14 @@ def test_otel_exporters_publish_without_retaining_the_snapshot():
         "timestamp": "2026-01-01T00:00:00+00:00",
         "client_type": "python-sdk",
         "client_version": "1.0.0",
-        "conn_type": "sync",
         "cluster_name": "local",
         "app_id": "checkout",
     }
     snapshot = _Snapshot(document)
-    config = OtelExporterConfig(service_name="checkout", endpoint="http://127.0.0.1:4318")
-    exporter = OtelExporter(config)
+    exporter = OtelExporter(RecordingProvider())
     check_exporter(exporter, awaitable=False)
     exporter.export(snapshot)
-    stored = exporter.registry.current("python-sdk\n1.0.0\nsync\nlocal\ncheckout")
+    stored = exporter.registry.current("python-sdk\n1.0.0\nlocal\ncheckout")
     assert stored is document
     assert stored["app_id"] == "checkout"
     exporter.close()
@@ -116,20 +77,26 @@ def test_otel_exporters_publish_without_retaining_the_snapshot():
 
 @pytest.mark.asyncio
 async def test_async_otel_exporter_matches_the_async_protocol():
-    config = OtelExporterConfig(service_name="checkout", endpoint="http://127.0.0.1:4318")
-    exporter = AsyncOtelExporter(config)
+    exporter = AsyncOtelExporter(RecordingProvider())
     check_exporter(exporter, awaitable=True)
     await exporter.export(
-        _Snapshot({"client_type": "python-sdk", "conn_type": "async", "app_id": "checkout"})
+        _Snapshot({"client_type": "python-sdk", "app_id": "checkout"})
     )
-    assert exporter.registry.client_keys() == ("python-sdk\n\nasync\n\ncheckout",)
+    assert exporter.registry.client_keys() == ("python-sdk\n\n\ncheckout",)
     exporter.close()
 
 
 def test_catalog_rejects_a_conflicting_descriptor():
     catalog = MetricCatalog()
-    catalog.register(MetricDescriptor("aerospike.client.commands", InstrumentKind.COUNTER, "commands"))
-    catalog.register(MetricDescriptor("aerospike.client.commands", InstrumentKind.COUNTER, "commands"))
+    counter = MetricDescriptor(
+        "aerospike.client.commands", InstrumentKind.COUNTER, "commands"
+    )
+    catalog.register(counter)
+    catalog.register(counter)
     with pytest.raises(ValueError, match="already registered"):
-        catalog.register(MetricDescriptor("aerospike.client.commands", InstrumentKind.GAUGE, "commands"))
+        catalog.register(
+            MetricDescriptor(
+                "aerospike.client.commands", InstrumentKind.GAUGE, "commands"
+            )
+        )
     assert len(catalog) == 1

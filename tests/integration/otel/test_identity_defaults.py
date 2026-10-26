@@ -30,7 +30,8 @@ from aerospike_sdk import DataSet
 from aerospike_sdk.metrics import MetricsPolicy
 from aerospike_sdk.sync import ClusterDefinition
 
-from aerospike_client_telemetry.otel import OtelExporter, OtelExporterConfig
+from aerospike_client_telemetry.otel import OtelExporter
+from tests.fake_provider import RecordingProvider
 from tests.integration.support import (
     CALLBACK_TIMEOUT_SECONDS,
     custom_metrics_settings,
@@ -42,12 +43,7 @@ pytestmark = pytest.mark.integration
 
 
 def _exporter() -> OtelExporter:
-    return OtelExporter(
-        OtelExporterConfig(
-            service_name="orders-service",
-            endpoint="http://127.0.0.1:4318/v1/metrics",
-        )
-    )
+    return OtelExporter(RecordingProvider())
 
 
 def _connect(host: str, port: int, *, app_id: str | None = None):
@@ -120,7 +116,6 @@ def test_omitted_app_id_is_not_set():
                 (
                     document["client_type"],
                     document["client_version"],
-                    document["conn_type"],
                     document["cluster_name"],
                     "not-set",
                 )

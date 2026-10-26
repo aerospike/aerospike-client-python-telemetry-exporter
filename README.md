@@ -21,12 +21,14 @@ tests/
 
 `common` has no vendor dependency. `recording` proves the client scheduler.
 `otel` publishes each canonical document into the registry and returns.
-The OpenTelemetry reader sends OTLP later. A failed send does not raise
-from `export`, so the client keeps calling it. `timeout` bounds the
-OpenTelemetry send; retry count and backoff belong to the installed
-OpenTelemetry exporter version. There is no retry-count setting.
-`close()` is what makes a later `export` raise. Install that backend
-with `pip install -e ".[otel]"`.
+The accepted contract is that the webapp passes a `MeterProvider` and this
+package only registers instruments on it. It does not create a resource, an
+OTLP exporter, a periodic reader, or a meter provider. The reader already on
+that provider sends OTLP later. A failed send does not raise from `export`,
+so the client keeps calling it. `close()` does not shut the provider down;
+it is what makes a later `export` raise. The earlier implementation that
+built the pipeline is preserved on branch `OM-373-DONT-DELETE`. Install the
+backend with `pip install -e ".[otel]"`.
 Import it from `aerospike_client_telemetry.otel`. The top-level package does not
 load it.
 
@@ -90,9 +92,8 @@ The same list is the test catalog in `SHARED_DESIGN.md` under
 translation without mutation, no snapshot retention, injected failure.
 
 `tests/unit/otel/test_package.py` — importing OTel does not import
-`opentelemetry`, the root package does not export `OtelExporter`, config
-copies headers and leaves temporality unset, sync publish then `close`
-rejects another export, async publish, catalog conflict.
+`opentelemetry`, the root package does not export `OtelExporter`, sync
+publish then `close` rejects another export, async publish, catalog conflict.
 
 `tests/unit/otel/test_multiple_exporters.py` — two exporter objects keep two
 registries; two publishes on one exporter keep the latest document.
@@ -103,15 +104,9 @@ reserved webapp labels dropped, empty node or namespace names omitted,
 duplicate node names both yielded, departed nodes and non-numeric values
 omitted, unmapped fields absent, and the registry keeps the latest document.
 
-`tests/unit/otel/test_provider.py` — `OtelExporter()` builds a provider from
-`OTEL_*` and `close()` shuts it down; an endpoint and service name override
-that environment; a passed-in meter provider is enough and is not shut down;
-a provider plus an endpoint does not open a second OTLP connection; unset
-temporality follows the environment and an explicit value overrides it;
-`proxy_url` is set on the HTTP session and rejected for gRPC. HTTP appends
-`/v1/metrics`; gRPC keeps the endpoint without that path. A stalled
-endpoint times out, and a configured proxy with nothing listening fails
-the send. Both are logged, and the next `export` still stores the document.
+`tests/unit/otel/test_provider.py` — a meter provider is required. The
+exporter registers the catalog on that provider and `close()` does not shut
+it down.
 
 ### Integration
 
@@ -131,9 +126,11 @@ exporter and a JSON writer receive the same cycle. The file is
 one exporter registration.
 
 `tests/integration/otel/test_passed_provider.py` — a meter provider passed
-in. The exporter does not open OTLP. Enable and disable start and stop the
-Aerospike export thread, and the provider keeps reporting the last
-`command_count` while that thread is stopped.
+in. The exporter does not open OTLP. The webapp's own counter and gauge are
+collected from that same provider beside `aerospike_client_command_count`.
+Enable and disable start and stop the Aerospike export thread. The provider
+keeps reporting the last client `command_count` while that thread is stopped,
+and the webapp instruments keep moving.
 
 `tests/integration/otel/test_webapp.py` — customer startup, an order write,
 operational and usage metrics, `client_app_ip` on the snapshot, and
@@ -141,21 +138,24 @@ shutdown. A second case registers that one exporter on two clients,
 `telemetry-it` and `telemetry-it-two`, and each cluster keeps its own
 document.
 
-`tests/integration/otel/test_collector.py` — the same webapp shape, with
-operational and usage metrics on, once over HTTP/protobuf and once over
-gRPC. It inserts, upserts, and then reads by point query, bin projection,
+`tests/integration/otel/test_collector.py` — the test builds the meter
+provider and its OTLP reader, once over HTTP/protobuf and once over gRPC,
+with operational and usage metrics on. It inserts, upserts, and then reads
+by point query, bin projection,
 exists, header, batch, set scan, and filtered query. Snapshot latency
 totals match those calls: read, write, batch, and query. Prometheus
 `command_count` matches the calls except single-key `exists`, which the
-SDK fast path does not count. All five latency bucket families arrive as
-cumulative `_bucket` series with `le`; the `+Inf` bucket equals the
+SDK fast path does not count. Whole-call cluster read/write/batch/query,
+node connection-acquisition, and namespace RPC latency buckets arrive as
+cumulative `_bucket` series with `le`; each `+Inf` bucket equals its
 corresponding snapshot total. With `-s`, the test prints the comparison.
 
 `tests/integration/otel/test_identity_defaults.py` — `app_id` is the name
 that keeps a client unique on one cluster. Omitting it stores `not-set`,
 unless the client has a username, which is then used as `app_id`.
-Omitting `cluster_name` stores the server name. The SDK fills client type,
-version, and `conn_type` (`sync` or `async`). Omitted labels are empty. Two clients on the default app id
+Omitting `cluster_name` stores the server name. The SDK fills client type
+and version; connection mode is not part of the revised snapshot identity.
+Omitted labels are empty. Two clients on the default app id
 share one snapshot. Two app ids keep both. The same app id on two clusters
 stays two series, because `cluster` is on every series.
 

@@ -28,7 +28,8 @@ from aerospike_sdk import DataSet
 from aerospike_sdk.metrics import MetricsPolicy
 from aerospike_sdk.sync import ClusterDefinition
 
-from aerospike_client_telemetry.otel import OtelExporter, OtelExporterConfig
+from aerospike_client_telemetry.otel import OtelExporter
+from tests.fake_provider import RecordingProvider
 from tests.integration.support import (
     CALLBACK_TIMEOUT_SECONDS,
     custom_metrics_settings,
@@ -40,20 +41,13 @@ pytestmark = pytest.mark.integration
 
 
 class _CountingExporter(OtelExporter):
-    def __init__(self, config: OtelExporterConfig) -> None:
-        super().__init__(config)
+    def __init__(self) -> None:
+        super().__init__(RecordingProvider())
         self.calls = 0
 
     def export(self, snapshot) -> None:
         self.calls += 1
         super().export(snapshot)
-
-
-def _config(service_name: str) -> OtelExporterConfig:
-    return OtelExporterConfig(
-        service_name=service_name,
-        endpoint=f"http://127.0.0.1:4318/v1/metrics/{service_name}",
-    )
 
 
 def _connect(host: str, port: int, app_id: str = "orders-service"):
@@ -89,8 +83,8 @@ def _shutdown(cluster, *exporters) -> None:
 
 def test_two_otel_exporters_each_receive_the_snapshot():
     host, port = seed_host()
-    orders = _CountingExporter(_config("orders"))
-    billing = _CountingExporter(_config("billing"))
+    orders = _CountingExporter()
+    billing = _CountingExporter()
     cluster = None
     try:
         cluster = _connect(host, port)
@@ -127,7 +121,7 @@ def _metrics(exporter: _CountingExporter) -> dict:
 def test_three_exporters_receive_the_same_metrics():
     host, port = seed_host()
     exporters = [
-        _CountingExporter(_config(name)) for name in ("orders", "billing", "shipping")
+        _CountingExporter() for _name in ("orders", "billing", "shipping")
     ]
     cluster = None
     try:
@@ -151,7 +145,7 @@ def test_three_exporters_receive_the_same_metrics():
         assert metrics[0]["app_id"] == "orders-service"
         assert metrics[0]["operational_metrics_enabled"] is True
         assert metrics[0]["usage_metrics_enabled"] is True
-        assert metrics[0]["cluster"]["command_count"] >= 1
+        assert metrics[0]["command_count"] >= 1
         assert metrics[0]["nodes"]
     finally:
         _shutdown(cluster, *exporters)
@@ -159,7 +153,7 @@ def test_three_exporters_receive_the_same_metrics():
 
 def test_same_otel_exporter_registered_twice_is_called_twice():
     host, port = seed_host()
-    exporter = _CountingExporter(_config("orders"))
+    exporter = _CountingExporter()
     cluster = None
     try:
         cluster = _connect(host, port)
@@ -184,8 +178,8 @@ def test_same_otel_exporter_registered_twice_is_called_twice():
 
 def test_two_clusters_each_register_a_different_exporter():
     host, port = seed_host()
-    orders_exporter = _CountingExporter(_config("orders"))
-    billing_exporter = _CountingExporter(_config("billing"))
+    orders_exporter = _CountingExporter()
+    billing_exporter = _CountingExporter()
     orders = billing = None
     try:
         orders = _connect(host, port, app_id="orders-service")
@@ -211,8 +205,12 @@ def test_two_clusters_each_register_a_different_exporter():
         )
         assert orders_exporter.registry is not billing_exporter.registry
         assert orders_exporter.registry.client_keys() != billing_exporter.registry.client_keys()
-        orders_document = orders_exporter.registry.current(orders_exporter.registry.client_keys()[0])
-        billing_document = billing_exporter.registry.current(billing_exporter.registry.client_keys()[0])
+        orders_document = orders_exporter.registry.current(
+            orders_exporter.registry.client_keys()[0]
+        )
+        billing_document = billing_exporter.registry.current(
+            billing_exporter.registry.client_keys()[0]
+        )
         assert len(orders_exporter.registry.client_keys()) == 1
         assert len(billing_exporter.registry.client_keys()) == 1
         assert orders_document["app_id"] == "orders-service"

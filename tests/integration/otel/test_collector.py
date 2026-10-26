@@ -12,8 +12,9 @@
 
 """Aerospike client to exporter to collector to Prometheus.
 
-The webapp is the same shape as ``test_webapp``: one sync cluster, one
-``OtelExporter`` that owns the pipeline. The collector receives OTLP/HTTP,
+The webapp is the same shape as ``test_webapp``: one sync cluster and one
+``OtelExporter``. The test builds the meter provider and its OTLP reader.
+The collector receives OTLP,
 writes a file, and exposes Prometheus text. Prometheus scrapes that endpoint.
 The test issues a counted set of inserts, upserts, and each read shape,
 then checks those counts against the snapshot latency groups and the
@@ -42,7 +43,7 @@ from aerospike_sdk.policy.system_settings import MetricsSettings, SystemSettings
 from aerospike_sdk.sync import ClusterDefinition
 
 from aerospike_client_telemetry.common import CATALOG, client_app_ip
-from aerospike_client_telemetry.otel import OtelExporter, OtelExporterConfig, Protocol
+from aerospike_client_telemetry.otel import OtelExporter
 from tests.integration.compose_group import container_name, labels, project_network
 from tests.integration.support import CALLBACK_TIMEOUT_SECONDS, namespace, seed_host
 
@@ -178,7 +179,13 @@ def _query_prometheus(port: int) -> list[dict]:
 
 def _format_series(series: list[dict]) -> str:
     lines = []
-    for item in sorted(series, key=lambda sample: (sample["metric"].get("__name__", ""), str(sample["metric"]))):
+    for item in sorted(
+        series,
+        key=lambda sample: (
+            sample["metric"].get("__name__", ""),
+            str(sample["metric"]),
+        ),
+    ):
         labels = item["metric"]
         name = labels.get("__name__", "")
         rendered = ",".join(
@@ -254,7 +261,9 @@ def _run_counted_workload(session, dataset) -> _Tally:
     """Insert, update, and read every shape once for a known number of calls."""
     keys = [dataset.id(i) for i in range(_INSERTS)]
     for index, key in enumerate(keys):
-        session.insert(key).put({"sku": f"sku-{index}", "qty": index + 1, "price": 100 + index}).execute()
+        session.insert(key).put(
+            {"sku": f"sku-{index}", "qty": index + 1, "price": 100 + index}
+        ).execute()
     for index, key in enumerate(keys):
         session.upsert(key).put({"qty": index + 1, "price": 200 + index}).execute()
     for key in keys:
@@ -326,7 +335,8 @@ def _wait_for_series(port: int, command_count: int) -> list[dict]:
         time.sleep(0.5)
     rendered = _format_series(series)
     raise AssertionError(
-        f"Prometheus command count is {_command_count(series)}, expected {command_count}:\n{rendered[:2000]}"
+        f"Prometheus command count is {_command_count(series)}, "
+        f"expected {command_count}:\n{rendered[:2000]}"
     )
 
 
@@ -334,18 +344,21 @@ def _latency_count(document: dict, group: str, namespace_name: str) -> int:
     total = 0
     for node in document.get("nodes") or []:
         for namespace_doc in node.get("namespaces") or []:
-            if namespace_doc.get("name") != namespace_name:
+            if namespace_doc.get("namespace") != namespace_name:
                 continue
-            buckets = (namespace_doc.get("latency") or {}).get(group) or []
-            if isinstance(buckets, list):
-                total += sum(buckets)
+            for latency in namespace_doc.get("latencies") or []:
+                if latency.get("type") == group:
+                    total += int(latency.get("count", 0))
     return total
 
 
 def _feature_count(series: list[dict], feature: str) -> float:
     for sample in series:
         labels = sample["metric"]
-        if labels.get("__name__") == "aerospike_client_feature_usage" and labels.get("feature") == feature:
+        if (
+            labels.get("__name__") == "aerospike_client_feature_usage"
+            and labels.get("feature") == feature
+        ):
             return float(sample["value"][1])
     return 0.0
 
@@ -379,14 +392,16 @@ def _print_coverage(series: list[dict], document: dict, tally: _Tally, namespace
         "",
         "calls against counters",
         f"  inserts={tally.inserts} upserts={tally.upserts} list_updates={tally.list_updates}",
-        f"  point_reads={tally.point_reads} bin_reads={tally.bin_reads} exists={tally.exists_reads} header_reads={tally.header_reads}",
-        f"  batch_reads={tally.batch_reads} batch_writes={tally.batch_writes} scans={tally.scans} filter_queries={tally.filter_queries}",
+        f"  point_reads={tally.point_reads} bin_reads={tally.bin_reads} "
+        f"exists={tally.exists_reads} header_reads={tally.header_reads}",
+        f"  batch_reads={tally.batch_reads} batch_writes={tally.batch_writes} "
+        f"scans={tally.scans} filter_queries={tally.filter_queries}",
         f"  command_count {_command_count(series):.0f} expected {tally.recorded_commands}",
-        f"  feature.api.blocking {_feature_count(series, 'feature.api.blocking'):.0f} expected {tally.recorded_commands}",
-        f"  feature.shape.point {_feature_count(series, 'feature.shape.point'):.0f} expected {tally.recorded_points}",
-        f"  feature.shape.batch {_feature_count(series, 'feature.shape.batch'):.0f} expected {tally.batch_calls}",
-        f"  feature.shape.query {_feature_count(series, 'feature.shape.query'):.0f} expected {tally.query_calls}",
-        f"  feature.cdt {_feature_count(series, 'feature.cdt'):.0f} expected {tally.list_updates}",
+        f"  blocking {_feature_count(series, 'blocking'):.0f} expected {tally.recorded_commands}",
+        f"  shape_point {_feature_count(series, 'shape_point'):.0f} "
+        f"expected {tally.recorded_points}",
+        f"  shape_batch {_feature_count(series, 'shape_batch'):.0f} expected {tally.batch_calls}",
+        f"  shape_query {_feature_count(series, 'shape_query'):.0f} expected {tally.query_calls}",
         f"  exists calls {tally.exists_reads} are in latency read and not in the command counter",
         f"  latency read {read_seen} expected {tally.read_calls}",
         f"  latency write {write_seen} expected {tally.write_calls}",
@@ -400,7 +415,10 @@ def _print_coverage(series: list[dict], document: dict, tally: _Tally, namespace
         if name == "aerospike_client_feature_usage":
             features = ", ".join(
                 f"{sample['metric'].get('feature')}={sample['value'][1]}"
-                for sample in sorted(samples, key=lambda sample: sample["metric"].get("feature", ""))
+                for sample in sorted(
+                    samples,
+                    key=lambda sample: sample["metric"].get("feature", ""),
+                )
             )
             lines.append(f"  {name}  {features}")
             continue
@@ -412,23 +430,43 @@ def _print_coverage(series: list[dict], document: dict, tally: _Tally, namespace
     print("\n".join(lines))
 
 
-@pytest.mark.parametrize("protocol", [Protocol.HTTP_PROTOBUF, Protocol.GRPC])
-def test_webapp_pushes_a_client_metric_to_the_collector(otel_collector, protocol):
-    http_port, grpc_port, metrics, container, prometheus_port = otel_collector
-    if protocol is Protocol.HTTP_PROTOBUF:
-        endpoint = f"http://127.0.0.1:{http_port}/v1/metrics"
+def _webapp_provider(endpoint: str, *, grpc: bool):
+    """The pipeline a webapp owns: resource, OTLP exporter, reader, provider."""
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+    from opentelemetry.sdk.resources import Resource
+
+    if grpc:
+        from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
     else:
-        endpoint = f"http://127.0.0.1:{grpc_port}"
-    host, port = seed_host()
-    exporter = OtelExporter(
-        OtelExporterConfig(
-            service_name="orders-service",
+        from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+
+        trimmed = endpoint.rstrip("/")
+        if not trimmed.endswith("/v1/metrics"):
+            endpoint = trimmed + "/v1/metrics"
+    reader = PeriodicExportingMetricReader(
+        OTLPMetricExporter(
             endpoint=endpoint,
-            protocol=protocol,
-            export_interval=timedelta(seconds=1),
             headers={"authorization": "Bearer orders-token"},
-        )
+        ),
+        export_interval_millis=1000,
     )
+    return MeterProvider(
+        metric_readers=[reader],
+        resource=Resource.create({"service.name": "orders-service"}),
+    )
+
+
+@pytest.mark.parametrize("grpc", [False, True], ids=["http", "grpc"])
+def test_webapp_pushes_a_client_metric_to_the_collector(otel_collector, grpc):
+    http_port, grpc_port, metrics, container, prometheus_port = otel_collector
+    if grpc:
+        endpoint = f"http://127.0.0.1:{grpc_port}"
+    else:
+        endpoint = f"http://127.0.0.1:{http_port}"
+    host, port = seed_host()
+    provider = _webapp_provider(endpoint, grpc=grpc)
+    exporter = OtelExporter(provider)
     cluster = None
     try:
         cluster = (
@@ -446,6 +484,7 @@ def test_webapp_pushes_a_client_metric_to_the_collector(otel_collector, protocol
         )
     except Exception as exc:
         exporter.close()
+        provider.shutdown()
         pytest.skip(f"Aerospike seed {host}:{port} unavailable: {exc}")
 
     try:
@@ -496,7 +535,7 @@ def test_webapp_pushes_a_client_metric_to_the_collector(otel_collector, protocol
         assert "telemetry-it" in payload
         assert "prod" in payload
 
-        published = int(document["cluster"]["command_count"])
+        published = int(document["command_count"])
         series = _wait_for_series(prometheus_port, published)
         _print_coverage(series, document, tally, namespace_name)
         command = next(
@@ -509,13 +548,11 @@ def test_webapp_pushes_a_client_metric_to_the_collector(otel_collector, protocol
         assert command["metric"]["environment"] == "prod"
         assert command["metric"]["client_app_ip"] == client_app_ip()
         assert command["metric"]["service_name"] == "orders-service"
-        assert exporter.config.protocol is protocol
         assert float(command["value"][1]) == tally.recorded_commands
-        assert _feature_count(series, "feature.api.blocking") == tally.recorded_commands
-        assert _feature_count(series, "feature.shape.point") == tally.recorded_points
-        assert _feature_count(series, "feature.shape.batch") == tally.batch_calls
-        assert _feature_count(series, "feature.shape.query") == tally.query_calls
-        assert _feature_count(series, "feature.cdt") == tally.list_updates
+        assert _feature_count(series, "blocking") == tally.recorded_commands
+        assert _feature_count(series, "shape_point") == tally.recorded_points
+        assert _feature_count(series, "shape_batch") == tally.batch_calls
+        assert _feature_count(series, "shape_query") == tally.query_calls
         assert _latency_count(document, "read", namespace_name) == tally.read_calls
         assert _latency_count(document, "write", namespace_name) == tally.write_calls
         assert _latency_count(document, "batch", namespace_name) == tally.batch_calls
@@ -534,13 +571,13 @@ def test_webapp_pushes_a_client_metric_to_the_collector(otel_collector, protocol
             for sample in series
             if sample["metric"].get("__name__") == "aerospike_client_feature_usage"
         }
-        assert "feature.api.blocking" in features
-        assert "feature.shape.point" in features
-        assert "feature.shape.batch" in features
-        assert "feature.shape.query" in features
-        assert "feature.cdt" in features
+        assert "blocking" in features
+        assert "shape_point" in features
+        assert "shape_batch" in features
+        assert "shape_query" in features
     finally:
         if cluster is not None:
             cluster.disable_metrics()
             cluster.close()
         exporter.close()
+        provider.shutdown()

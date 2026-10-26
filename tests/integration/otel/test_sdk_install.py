@@ -25,7 +25,8 @@ import aerospike_sdk
 from aerospike_sdk import DataSet
 from aerospike_sdk.sync import ClusterDefinition
 
-from aerospike_client_telemetry.otel import OtelExporter, OtelExporterConfig
+from aerospike_client_telemetry.otel import OtelExporter
+from tests.fake_provider import RecordingProvider
 from tests.integration.support import (
     CALLBACK_TIMEOUT_SECONDS,
     custom_metrics_settings,
@@ -42,12 +43,7 @@ def test_installed_sdk_pushes_a_snapshot_to_the_exporter():
     assert aerospike_sdk.__version__
     assert aerospike_sdk.__version__ != "0.0.0"
 
-    exporter = OtelExporter(
-        OtelExporterConfig(
-            service_name="orders-service",
-            endpoint="http://127.0.0.1:4318/v1/metrics",
-        )
-    )
+    exporter = OtelExporter(RecordingProvider())
     host, port = seed_host()
     definition = (
         ClusterDefinition(host, port)
