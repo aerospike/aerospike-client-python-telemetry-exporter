@@ -21,8 +21,8 @@ permissions:
   id-token: write
 
 env:
-  # CLIENT-OM-372 at "docs(metrics): add exporter delivery examples".
-  SDK_REF: a9b9a897145e87a80671c86e47bfac37000cbff6
+  # CLIENT-OM-372 at "feat(metrics): align revised snapshot contract".
+  SDK_REF: 34633121cdeba119f92e726a2cf3c76951ae87dc
 
 jobs:
   lint:

@@ -46,6 +46,22 @@ python -m pip show aerospike-sdk aerospike-native
 `aerospike-sdk` must report the local SDK checkout as its editable project
 location. The client branch used here is `CLIENT-OM-372`.
 
+## Snapshot contract
+
+The exporter consumes the revised `MetricsSnapshot.to_canonical_dict()` shape:
+
+- cluster totals and whole-call read/write/batch/query latency are top-level;
+- each node has one four-field pool, connection latency, and existing-node
+  open/TLS/auth failure counters;
+- each namespace has the error split, bytes, and RPC read/write/batch/query
+  latency summaries;
+- usage has only the approved short names;
+- `conn_type`, close reasons, pool exhaustion, and node error rate are absent.
+
+The SDK/native layer does not yet provide delay-queue timeout count, pre-node
+validation failures, namespace-attributed client timeouts, or authoritative
+batch-partial failures. The exporter does not invent zeroes for them.
+
 Async SDK clients preserve the application's event loop by default. For
 custom exporters that may block, the client can opt into a dedicated exporter
 event loop with `MetricsSettings(async_exporter_isolation=True)`. An exporter
@@ -76,7 +92,7 @@ do not call private timer methods.
 Pull requests to `dev` and `main` run `.github/workflows/build-test.yml`.
 That workflow lints with Ruff, compiles on Python 3.11, runs the unit tests
 on 3.11 and 3.14, and runs the integration tests on 3.14. It installs the
-client SDK from commit `a9b9a89` on `CLIENT-OM-372` and leaves
+client SDK from commit `3463312` on `CLIENT-OM-372` and leaves
 `AEROSPIKE_HOST` unset, so the integration suite starts its own containers.
 Each test job uploads `junit.xml` and `pytest.log` to the Actions run for
 90 days. A failed integration run also uploads the container logs. The
@@ -102,7 +118,8 @@ registries; two publishes on one exporter keep the latest document.
 `client_app_ip` on every series,
 reserved webapp labels dropped, empty node or namespace names omitted,
 duplicate node names both yielded, departed nodes and non-numeric values
-omitted, unmapped fields absent, and the registry keeps the latest document.
+omitted, revised latency scopes, existing-node connection failures, unmapped
+fields absent, and the registry keeps the latest document.
 
 `tests/unit/otel/test_provider.py` — a meter provider is required. The
 exporter registers the catalog on that provider and `close()` does not shut
