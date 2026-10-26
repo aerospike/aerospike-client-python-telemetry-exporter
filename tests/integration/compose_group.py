@@ -82,7 +82,15 @@ def stop_network() -> None:
 
 def _drop_stale_project() -> None:
     """Drop a project left behind by a crashed run so the names can be reused."""
-    for service in ("prometheus", "otel-collector", "aerospike-two", "aerospike"):
+    for service in (
+        "prometheus",
+        "otel-collector",
+        "aerospike-two",
+        "aerospike",
+        "aerospike-down",
+        "aerospike-pair-a",
+        "aerospike-pair-b",
+    ):
         _drop_container(container_name(service))
     _drop_network(NETWORK_NAME)
 

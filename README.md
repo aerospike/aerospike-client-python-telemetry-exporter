@@ -58,6 +58,13 @@ The exporter consumes the revised `MetricsSnapshot.to_canonical_dict()` shape:
 - usage has only the approved short names;
 - `conn_type`, close reasons, pool exhaustion, and node error rate are absent.
 
+`operational_metrics_enabled is False` omits the operational series, and
+`usage_metrics_enabled is False` omits feature usage. A missing flag does not
+hide a series. Always-on gauges are published whenever a document is stored.
+`nodes_departed` stays on the document and is not published.
+
+Every series carries `client_type`, `client_version`, `cluster`, and `app_id`, plus `client_app_ip` when it can be detected. Customer labels from `MetricsPolicy.labels` are added unless the name collides with one of those. Node and namespace series add `server_node_id` (the server node id), `server_node_address`, `server_node_port`, and `ns`. Latency buckets add `le`. Feature usage adds `feature`.
+
 The SDK/native layer does not yet provide delay-queue timeout count, pre-node
 validation failures, namespace-attributed client timeouts, or authoritative
 batch-partial failures. The exporter does not invent zeroes for them.
@@ -80,7 +87,9 @@ loop.
 `-q` prints one dot per test. `-s` shows `print` output. Unit tests do not
 need a server. Integration tests start one Aerospike Enterprise `8.2.0.0`
 container for the session, on an ephemeral host port, and stop it afterward.
-The image's single-node evaluation feature key is used. The container
+The image's single-node evaluation feature key is used, so that container
+cannot form a two-node cluster. The one-node-down test starts its own
+Community Edition `8.2.0.0` pair for that reason. The container
 publishes that host port as its access address, so the client connects
 directly. Set `AEROSPIKE_HOST` to use a server that is already running
 instead. If that server advertises an address the client cannot reach, set
@@ -119,11 +128,20 @@ registries; two publishes on one exporter keep the latest document.
 reserved webapp labels dropped, empty node or namespace names omitted,
 duplicate node names both yielded, departed nodes and non-numeric values
 omitted, revised latency scopes, existing-node connection failures, unmapped
-fields absent, and the registry keeps the latest document.
+fields absent, a disabled operational or usage tier omits that tier and keeps
+the always-on gauges, and the registry keeps the latest document.
 
 `tests/unit/otel/test_provider.py` — a meter provider is required. The
 exporter registers the catalog on that provider and `close()` does not shut
 it down.
+
+`tests/unit/otel/test_reader_interval.py` — a real periodic reader on a
+different clock from `export()`. A reader faster than the client push
+reports the same absolute command count and node count again, and does not
+double them. A reader slower than the client push publishes only the latest
+snapshot; the overwritten command count and node count are absent. The waits
+are shortened. The ratios match a 15-second reader against a 30-second push,
+and a 60-second reader against a 30-second push.
 
 ### Integration
 
@@ -147,7 +165,18 @@ in. The exporter does not open OTLP. The webapp's own counter and gauge are
 collected from that same provider beside `aerospike_client_command_count`.
 Enable and disable start and stop the Aerospike export thread. The provider
 keeps reporting the last client `command_count` while that thread is stopped,
-and the webapp instruments keep moving.
+and the webapp instruments keep moving. With metrics still enabled, turning
+operational metrics off and back on drops and restores command count while
+node count stays; turning feature usage off and back on does the same for
+`aerospike_client_feature_usage`.
+
+`tests/integration/otel/test_server_down.py` — metrics stay enabled. When the
+only server stops, the client keeps that seed while tend is refused, so the
+next snapshots still list it: node count 1, invalid count 0, empty
+`nodes_departed`, and the last command count. The callback keeps publishing
+that picture. When one node of a two-node cluster stops, that host appears
+once in `nodes_departed` and is not published. Node count becomes 1, and the
+callback keeps connection series for the survivor only.
 
 `tests/integration/otel/test_webapp.py` — customer startup, an order write,
 operational and usage metrics, `client_app_ip` on the snapshot, and

@@ -369,7 +369,7 @@ def _latency_bucket_count(series: list[dict], group: str, namespace_name: str, l
         float(sample["value"][1])
         for sample in series
         if sample["metric"].get("__name__") == name
-        and sample["metric"].get("namespace") == namespace_name
+        and sample["metric"].get("ns") == namespace_name
         and sample["metric"].get("le") == le
     )
 

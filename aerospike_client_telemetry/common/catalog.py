@@ -36,28 +36,31 @@ class InstrumentKind(str, Enum):
 
 
 # Snapshot label key to the name exported on every series. A key that is
-# absent keeps its own name. Node ``name`` and namespace ``name`` are not
-# entries: those fields become ``node`` and ``namespace`` when they are read
-# off their own object.
+# absent keeps its own name. The node id, address, port, and namespace are
+# read off each node object and renamed here.
 LABEL_MAP = {
     "cluster_name": "cluster",
     "client_type": "client_type",
     "client_version": "client_version",
     "app_id": "app_id",
+    "node": "server_node_id",
+    "node_address": "server_node_address",
+    "node_port": "server_node_port",
+    "namespace": "ns",
 }
 
 # Exported names a webapp label must not replace. Identity and the dimensions
-# this package adds (node, namespace, bucket bound) occupy them.
+# this package adds (server node id, namespace, bucket bound) occupy them.
 RESERVED_LABELS = frozenset(
     {
         "cluster",
         "client_type",
         "client_version",
         "app_id",
-        "node",
-        "node_address",
-        "node_port",
-        "namespace",
+        "server_node_id",
+        "server_node_address",
+        "server_node_port",
+        "ns",
         "le",
         "feature",
         "conn_type",
@@ -67,8 +70,8 @@ RESERVED_LABELS = frozenset(
 _IDENTITY = ("client_type", "client_version", "cluster_name", "app_id")
 _CLIENT_APP_IP_LABEL = "client_app_ip"
 _client_app_ip = ""
-_NODE_LABELS = ("node", "node_address", "node_port")
-_NAMESPACE_LABELS = _NODE_LABELS + ("namespace",)
+_NODE_LABELS = ("server_node_id", "server_node_address", "server_node_port")
+_NAMESPACE_LABELS = _NODE_LABELS + ("ns",)
 
 
 @dataclass(frozen=True)
@@ -288,6 +291,40 @@ def _metrics() -> dict[str, MetricDescriptor]:
 
 METRIC_MAP = _metrics()
 
+# The client records these only while MetricsPolicy.operational_enabled is on.
+# The snapshot can still carry the last totals after the tier is turned off.
+_OPERATIONAL_PREFIXES = ("cluster.latency.", "namespace.latency.")
+_OPERATIONAL_SOURCES = frozenset(
+    {
+        "command_count",
+        "command_retries",
+        "node.connection_open_failure",
+        "node.connection_tls_handshake_failure",
+        "node.connection_auth_failure",
+        "node.latency.conn",
+        "namespace.errors",
+        "namespace.server_timeouts",
+        "namespace.key_busy",
+        "namespace.record_too_big",
+        "namespace.device_overload",
+        "namespace.bytes_in",
+        "namespace.bytes_out",
+    }
+)
+
+
+def _tier_is_off(document: Mapping[str, Any], source: str) -> bool:
+    """Whether this snapshot says not to publish ``source``.
+
+    A missing flag does not hide the series. ``False`` does. Always-on gauges
+    are published whenever the document is present.
+    """
+    if source == "usage":
+        return document.get("usage_metrics_enabled") is False
+    if source in _OPERATIONAL_SOURCES or source.startswith(_OPERATIONAL_PREFIXES):
+        return document.get("operational_metrics_enabled") is False
+    return False
+
 
 class MetricCatalog:
     """Descriptors shared by backends."""
@@ -370,8 +407,8 @@ def series_attributes(
 
     Identity is renamed through the global map. A webapp label that lands on
     a reserved name is dropped. ``client_app_ip`` is the webapp address and is on
-    every series. ``extra`` holds dimensions for this point, such as ``node``
-    or ``namespace``, and those are renamed by the same map.
+    every series. ``extra`` holds dimensions for this point, such as ``server_node_id``
+    or ``ns``, and those are renamed by the same map.
     """
     attributes: dict[str, str] = {}
     for source in _IDENTITY:
@@ -407,8 +444,14 @@ def iter_metric_points(
     observable histogram callback, so a compatible Prometheus-style
     histogram is emitted as cumulative observable counters with an ``le``
     label. Bucket boundaries are in the snapshot's latency unit.
+
+    ``operational_metrics_enabled`` false omits the operational tier, and
+    ``usage_metrics_enabled`` false omits feature usage. Always-on gauges are
+    still yielded.
     """
     source = descriptor.source
+    if _tier_is_off(document, source):
+        return
     if source.startswith("cluster.latency."):
         group = source.rsplit(".", 1)[1]
         buckets = _latency_buckets(document.get("cluster_latencies"), group)
@@ -431,7 +474,7 @@ def iter_metric_points(
             for namespace in _mappings(node.get("namespaces")):
                 point = dict(node_labels)
                 if namespace.get("namespace"):
-                    point["namespace"] = str(namespace["namespace"])
+                    point["ns"] = str(namespace["namespace"])
                 yield from _bucket_points(
                     document,
                     _latency_buckets(namespace.get("latencies"), group),
@@ -456,7 +499,7 @@ def iter_metric_points(
                     continue
                 point = dict(extra)
                 if namespace.get("namespace"):
-                    point["namespace"] = str(namespace["namespace"])
+                    point["ns"] = str(namespace["namespace"])
                 yield number, point
         return
     if source.startswith("node."):
@@ -481,11 +524,11 @@ def _mappings(value: Any) -> Iterator[Mapping[str, Any]]:
 def _node_labels(node: Mapping[str, Any]) -> dict[str, str]:
     labels: dict[str, str] = {}
     if node.get("node_name"):
-        labels["node"] = str(node["node_name"])
+        labels["server_node_id"] = str(node["node_name"])
     if node.get("node_address"):
-        labels["node_address"] = str(node["node_address"])
+        labels["server_node_address"] = str(node["node_address"])
     if node.get("node_port") is not None:
-        labels["node_port"] = str(node["node_port"])
+        labels["server_node_port"] = str(node["node_port"])
     return labels
 
 
@@ -513,9 +556,7 @@ def _bucket_points(
             continue
         cumulative += int(count)
         point = dict(labels)
-        point["le"] = (
-            "+Inf" if index == len(buckets) - 1 else _format_latency_bound(upper_bound)
-        )
+        point["le"] = "+Inf" if index == len(buckets) - 1 else _format_latency_bound(upper_bound)
         yield cumulative, point
         upper_bound *= base
 

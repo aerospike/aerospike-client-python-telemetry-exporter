@@ -28,6 +28,7 @@ import time
 import pytest
 
 from aerospike_sdk import DataSet
+from aerospike_sdk.metrics import MetricsPolicy
 from aerospike_sdk.sync import ClusterDefinition
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
@@ -263,4 +264,96 @@ def test_webapp_metrics_continue_while_client_metrics_are_disabled(monkeypatch):
         cluster.close()
         exporter.close()
         assert provider._shutdown is False
+        provider.shutdown()
+
+
+def _wait_for_snapshot(exporter: OtelExporter, predicate):
+    deadline = time.monotonic() + CALLBACK_TIMEOUT_SECONDS
+    last = None
+    while time.monotonic() < deadline:
+        for key in exporter.registry.client_keys():
+            document = exporter.registry.current(key)
+            if document and predicate(document):
+                return document
+            last = document
+        time.sleep(0.05)
+    raise AssertionError(f"snapshot did not match, last flags {last}")
+
+
+def test_operational_and_usage_flags_gate_the_callback(monkeypatch):
+    reader, provider = _running_provider(monkeypatch)
+    exporter = OtelExporter(provider)
+    cluster = _connect("tier-toggle", exporter, provider)
+    dataset = DataSet.of(namespace(), "tier_toggle")
+    try:
+        cluster.add_exporter(exporter)
+        cluster.enable_metrics(MetricsPolicy())
+        assert cluster.metrics_enabled() is True
+        _write(cluster, dataset)
+        gauges_only = _wait_for_snapshot(
+            exporter,
+            lambda document: document.get("metrics_enabled") is True
+            and document.get("operational_metrics_enabled") is False
+            and document.get("usage_metrics_enabled") is False,
+        )
+        collected = _collected(reader)
+        assert "aerospike_client_total_nodes" in collected
+        assert "aerospike_client_command_count" not in collected
+        assert "aerospike_client_feature_usage" not in collected
+
+        cluster.enable_metrics(MetricsPolicy(operational_enabled=True))
+        _write(cluster, dataset)
+        operational = _wait_for_snapshot(
+            exporter,
+            lambda document: document.get("operational_metrics_enabled") is True
+            and document.get("usage_metrics_enabled") is False
+            and document.get("timestamp") != gauges_only["timestamp"]
+            and document.get("command_count", 0) >= 1,
+        )
+        collected = _collected(reader)
+        assert collected["aerospike_client_command_count"][0] == "aerospike.client"
+        assert "aerospike_client_feature_usage" not in collected
+        assert "aerospike_client_total_nodes" in collected
+
+        cluster.enable_metrics(MetricsPolicy(operational_enabled=True, usage_enabled=True))
+        _write(cluster, dataset)
+        both = _wait_for_snapshot(
+            exporter,
+            lambda document: document.get("operational_metrics_enabled") is True
+            and document.get("usage_metrics_enabled") is True
+            and document.get("timestamp") != operational["timestamp"]
+            and document.get("usage", {}).get("blocking", 0) >= 1,
+        )
+        collected = _collected(reader)
+        assert "aerospike_client_command_count" in collected
+        assert collected["aerospike_client_feature_usage"][0] == "aerospike.client"
+
+        cluster.enable_metrics(MetricsPolicy(usage_enabled=True))
+        _wait_for_snapshot(
+            exporter,
+            lambda document: document.get("operational_metrics_enabled") is False
+            and document.get("usage_metrics_enabled") is True
+            and document.get("timestamp") != both["timestamp"],
+        )
+        collected = _collected(reader)
+        assert "aerospike_client_command_count" not in collected
+        assert "aerospike_client_feature_usage" in collected
+        assert "aerospike_client_total_nodes" in collected
+
+        cluster.enable_metrics(MetricsPolicy())
+        _wait_for_snapshot(
+            exporter,
+            lambda document: document.get("operational_metrics_enabled") is False
+            and document.get("usage_metrics_enabled") is False
+            and document.get("metrics_enabled") is True,
+        )
+        collected = _collected(reader)
+        assert cluster.metrics_enabled() is True
+        assert "aerospike_client_command_count" not in collected
+        assert "aerospike_client_feature_usage" not in collected
+        assert "aerospike_client_total_nodes" in collected
+    finally:
+        cluster.disable_metrics()
+        cluster.close()
+        exporter.close()
         provider.shutdown()
