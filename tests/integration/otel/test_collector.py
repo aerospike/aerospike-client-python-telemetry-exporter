@@ -516,7 +516,7 @@ def test_webapp_pushes_a_client_metric_to_the_collector(otel_collector, grpc):
                 if current and current.get("app_id") == "orders-service":
                     current_document = current
                     break
-            count = (current_document or {}).get("cluster", {}).get("command_count")
+            count = (current_document or {}).get("command_count")
             if current_document is not None and count == seen_count and count:
                 stable += 1
                 if stable >= 3:
