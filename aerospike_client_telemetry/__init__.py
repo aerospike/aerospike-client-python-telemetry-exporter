@@ -22,6 +22,13 @@ that snapshot.
   directly; this module does not load it.
 """
 
+try:
+    from importlib.metadata import version as _meta_version
+
+    __version__ = _meta_version("aerospike-client-telemetry-exporter")
+except Exception:
+    __version__ = "0.0.0"
+
 from aerospike_client_telemetry.recording import (
     AsyncRecordingExporter,
     RecordedExport,

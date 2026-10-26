@@ -112,7 +112,13 @@ drop the extra checkout and that check. `AEROSPIKE_HOST` stays unset, so
 the integration suite starts its own containers. Each test job uploads
 `junit.xml` and `pytest.log` to the Actions run for 90 days. A failed
 integration run also uploads the container logs. The workflow does not
-publish a wheel.
+publish a wheel. The DEV release bundle workflows are added and have not
+been dispatched.
+The files stay in this repository. Feature-branch testing passes
+`dry_run=true`. The manual default is `true`, so omitting it on a manual
+run stays a dry run and attaches the wheel to the Actions run. The command
+does not take `promote-to-test`. A push to `dev` publishes to JFrog DEV.
+The plan is `~/Downloads/om372_client_lib_python/RELEASE_ARTIFACTS.md`.
 
 The same list is the test catalog in `SHARED_DESIGN.md` under
 `~/Downloads/om372_client_lib_python`. Open work is

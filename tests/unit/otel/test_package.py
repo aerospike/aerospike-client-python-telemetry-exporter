@@ -45,6 +45,7 @@ def test_root_package_does_not_export_the_otel_backend():
     import aerospike_client_telemetry
 
     assert "OtelExporter" not in aerospike_client_telemetry.__all__
+    assert aerospike_client_telemetry.__version__
 
 
 class _Snapshot:
@@ -79,24 +80,18 @@ def test_otel_exporters_publish_without_retaining_the_snapshot():
 async def test_async_otel_exporter_matches_the_async_protocol():
     exporter = AsyncOtelExporter(RecordingProvider())
     check_exporter(exporter, awaitable=True)
-    await exporter.export(
-        _Snapshot({"client_type": "python-sdk", "app_id": "checkout"})
-    )
+    await exporter.export(_Snapshot({"client_type": "python-sdk", "app_id": "checkout"}))
     assert exporter.registry.client_keys() == ("python-sdk\n\n\ncheckout",)
     exporter.close()
 
 
 def test_catalog_rejects_a_conflicting_descriptor():
     catalog = MetricCatalog()
-    counter = MetricDescriptor(
-        "aerospike.client.commands", InstrumentKind.COUNTER, "commands"
-    )
+    counter = MetricDescriptor("aerospike.client.commands", InstrumentKind.COUNTER, "commands")
     catalog.register(counter)
     catalog.register(counter)
     with pytest.raises(ValueError, match="already registered"):
         catalog.register(
-            MetricDescriptor(
-                "aerospike.client.commands", InstrumentKind.GAUGE, "commands"
-            )
+            MetricDescriptor("aerospike.client.commands", InstrumentKind.GAUGE, "commands")
         )
     assert len(catalog) == 1

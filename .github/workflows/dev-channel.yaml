@@ -1,0 +1,123 @@
+name: Dev channel publish
+
+# Publishes a uniquely-versioned wheel and sdist to the JFrog DEV lifecycle
+# on every merge to dev. The committed VERSION file is never mutated. The
+# next dev version is computed here and stamped only in the build workspace.
+#
+# Manual dispatch defaults to a dry run. A push to dev does not receive
+# dry_run and publishes. promote-to-test is fixed false in this file. The
+# gh workflow run command does not take that input.
+
+on:
+  push:
+    branches:
+      - dev
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build the packages but keep deploy and the bundle in dry-run mode.
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  id-token: write
+  contents: read
+  actions: write
+
+# Queue rapid merges rather than cancel: a cancelled run could leave a
+# partially uploaded build in the dev repo.
+concurrency:
+  group: dev-channel-publish
+  cancel-in-progress: false
+
+jobs:
+  compute-version:
+    runs-on: ${{ vars.BUILD_CONTAINER_DISTRO_VERSION || 'ubuntu-22.04' }}
+    outputs:
+      stamped-version: ${{ steps.next.outputs.version }}
+      pep440-version: ${{ steps.next.outputs.pep440-version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Read committed version
+        id: base
+        uses: ./.github/actions/get-version
+
+      - name: Compute next dev version
+        id: next
+        run: |
+          python .github/scripts/next_dev_version.py \
+            "${{ steps.base.outputs.release-version }}" \
+            "${{ github.run_number }}" | tee -a "$GITHUB_OUTPUT"
+
+  build-publish:
+    needs: compute-version
+    uses: ./.github/workflows/build-release.yaml
+    with:
+      promote-to-test: false
+      # A manual run uses the dry_run input, which defaults to true.
+      # A push to dev does not receive the input and publishes.
+      dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+      version-override: ${{ needs.compute-version.outputs.stamped-version }}
+    secrets: inherit
+
+  # Installs the published version by name from the dev index, with no
+  # source checkout. Skipped on a dry run because nothing was uploaded.
+  smoke-install:
+    needs: [compute-version, build-publish]
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run == false }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Setup JFrog CLI
+        id: jfrog
+        uses: step-security/setup-jfrog-cli@3054b554c0fb4915b3d58847fb7730c593dbb934 # v5.0.0
+        env:
+          JF_URL: https://artifact.aerospike.io
+          JF_PROJECT: ${{ vars.JFROG_PROJECT }}
+        with:
+          oidc-provider-name: ${{ vars.OIDC_PROVIDER_NAME || 'gh-aerospike' }}
+          oidc-audience: ${{ vars.OIDC_AUDIENCE || 'aerospike' }}
+
+      - name: Install from the dev index
+        env:
+          JF_OIDC_USER: ${{ steps.jfrog.outputs.oidc-user }}
+          JF_OIDC_TOKEN: ${{ steps.jfrog.outputs.oidc-token }}
+          VERSION: ${{ needs.compute-version.outputs.pep440-version }}
+        run: |
+          set -euo pipefail
+          user_enc=$(python -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['JF_OIDC_USER'], safe=''))")
+          index="https://${user_enc}:${JF_OIDC_TOKEN}@artifact.aerospike.io/artifactory/api/pypi/${{ vars.JFROG_PROJECT }}-pypi-dev-local/simple/"
+          # The PyPI index can lag the upload by a few seconds, so retry
+          # rather than fail a publish that actually succeeded.
+          for attempt in 1 2 3 4 5; do
+            if pip install "aerospike-client-telemetry-exporter==${VERSION}" \
+                 --only-binary aerospike-native --extra-index-url "$index"; then
+              exit 0
+            fi
+            echo "Install attempt ${attempt} failed; waiting for the index to catch up"
+            sleep 15
+          done
+          echo "::error::aerospike-client-telemetry-exporter==${VERSION} did not install from the dev index"
+          exit 1
+
+      - name: Import and check version
+        env:
+          VERSION: ${{ needs.compute-version.outputs.pep440-version }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+
+          import aerospike_client_telemetry
+
+          expected = os.environ["VERSION"]
+          assert aerospike_client_telemetry.__version__ == expected, (
+              aerospike_client_telemetry.__version__, expected)
+          print("smoke OK:", aerospike_client_telemetry.__version__)
+          PY
