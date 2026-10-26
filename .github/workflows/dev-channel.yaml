@@ -83,7 +83,7 @@ jobs:
         uses: step-security/setup-jfrog-cli@3054b554c0fb4915b3d58847fb7730c593dbb934 # v5.0.0
         env:
           JF_URL: https://artifact.aerospike.io
-          JF_PROJECT: ${{ vars.JFROG_PROJECT }}
+          JF_PROJECT: ${{ vars.JFROG_PROJECT || 'database' }}
         with:
           oidc-provider-name: ${{ vars.OIDC_PROVIDER_NAME || 'gh-aerospike' }}
           oidc-audience: ${{ vars.OIDC_AUDIENCE || 'aerospike' }}
@@ -96,7 +96,7 @@ jobs:
         run: |
           set -euo pipefail
           user_enc=$(python -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['JF_OIDC_USER'], safe=''))")
-          index="https://${user_enc}:${JF_OIDC_TOKEN}@artifact.aerospike.io/artifactory/api/pypi/${{ vars.JFROG_PROJECT }}-pypi-dev-local/simple/"
+          index="https://${user_enc}:${JF_OIDC_TOKEN}@artifact.aerospike.io/artifactory/api/pypi/${{ vars.JFROG_PROJECT || 'database' }}-pypi-dev-local/simple/"
           # The PyPI index can lag the upload by a few seconds, so retry
           # rather than fail a publish that actually succeeded.
           for attempt in 1 2 3 4 5; do
