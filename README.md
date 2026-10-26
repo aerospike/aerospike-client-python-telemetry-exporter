@@ -65,6 +65,8 @@ hide a series. Always-on gauges are published whenever a document is stored.
 
 Every series carries `client_type`, `client_version`, `cluster`, and `app_id`, plus `client_app_ip` when it can be detected. Customer labels from `MetricsPolicy.labels` are added unless the name collides with one of those. Node and namespace series add `server_node_id` (the server node id), `server_node_address`, `server_node_port`, and `ns`. Latency buckets add `le`. Feature usage adds `feature`.
 
+A running client picks up a new label map only when the SDK config file sets `metrics.enabled`. `true` replaces the whole map on the next snapshot: a label still in the file stays, a new one is added, and a label left out disappears. `false` turns collection off. A file that leaves `enabled` out does not change labels that were set in code.
+
 The SDK/native layer does not yet provide delay-queue timeout count, pre-node
 validation failures, namespace-attributed client timeouts, or authoritative
 batch-partial failures. The exporter does not invent zeroes for them.
@@ -101,11 +103,16 @@ do not call private timer methods.
 Pull requests to `dev` and `main` run `.github/workflows/build-test.yml`.
 That workflow lints with Ruff, compiles on Python 3.11, runs the unit tests
 on 3.11 and 3.14, and runs the integration tests on 3.14. It installs the
-client SDK from commit `3463312` on `CLIENT-OM-372` and leaves
-`AEROSPIKE_HOST` unset, so the integration suite starts its own containers.
-Each test job uploads `junit.xml` and `pytest.log` to the Actions run for
-90 days. A failed integration run also uploads the container logs. The
-workflow does not publish a wheel.
+client SDK from commit `3463312` on `CLIENT-OM-372` and checks that the
+installed snapshot module contains `_SnapshotPolicy`. That class is on the
+pin and is absent from the published 1.0.0 release. `conn_type` is not on
+the pin. After `CLIENT-OM-372` merges, point `SDK_REF` at the SDK `dev`
+branch. When a released `aerospike-sdk` includes this snapshot contract,
+drop the extra checkout and that check. `AEROSPIKE_HOST` stays unset, so
+the integration suite starts its own containers. Each test job uploads
+`junit.xml` and `pytest.log` to the Actions run for 90 days. A failed
+integration run also uploads the container logs. The workflow does not
+publish a wheel.
 
 The same list is the test catalog in `SHARED_DESIGN.md` under
 `~/Downloads/om372_client_lib_python`. Open work is
@@ -157,6 +164,12 @@ starts a new one.
 exporter and a JSON writer receive the same cycle. The file is
 `build/recording-snapshot.json`.
 
+`tests/integration/recording/sync/test_dynamic_labels.py` — a config file
+that sets `metrics.enabled: true` replaces `metrics.labels` on reload.
+`environment` stays, `another_label` appears, and a label left out of the
+new map is gone. A file that never sets `enabled` leaves labels that were
+set in code unchanged.
+
 `tests/integration/otel/test_sdk_install.py` — public SDK version check, then
 one exporter registration.
 
@@ -169,6 +182,11 @@ and the webapp instruments keep moving. With metrics still enabled, turning
 operational metrics off and back on drops and restores command count while
 node count stays; turning feature usage off and back on does the same for
 `aerospike_client_feature_usage`.
+
+`tests/integration/otel/test_dynamic_operational.py` — the config file sets
+`metrics.enabled` and `extended.operational.enabled`. After operational
+metrics have arrived, rewriting that flag to false keeps collection on and
+the next callback omits command count. Node count stays.
 
 `tests/integration/otel/test_server_down.py` — metrics stay enabled. When the
 only server stops, the client keeps that seed while tend is refused, so the

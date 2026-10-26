@@ -1,8 +1,9 @@
 # Pull-request tests. Adapted from the client SDK's build-test workflow.
 #
-# The client SDK is pinned to a commit on CLIENT-OM-372. conn_type is on that
-# commit and is not in the published 1.0.0 release. This workflow does not
-# build or publish a wheel.
+# The client SDK is pinned to a commit on CLIENT-OM-372. That commit dropped
+# conn_type from the snapshot. _SnapshotPolicy is on that commit and is not
+# in the published 1.0.0 release. This workflow does not build or publish a
+# wheel.
 
 name: CI Build & Test
 
@@ -115,7 +116,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev,otel]" ./client-sdk --only-binary aerospike-native \
             --extra-index-url "https://${user_enc}:${JF_OIDC_TOKEN}@artifact.aerospike.io/artifactory/api/pypi/${{ vars.JFROG_PROJECT }}-pypi-dev-local/simple/"
-          python -c "import inspect, aerospike_sdk.metrics.snapshot as snapshot; assert 'conn_type' in inspect.getsource(snapshot), 'installed aerospike-sdk is not the pinned CLIENT-OM-372 commit'"
+          python -c "import inspect, aerospike_sdk.metrics.snapshot as snapshot; assert '_SnapshotPolicy' in inspect.getsource(snapshot), 'installed aerospike-sdk is not the pinned CLIENT-OM-372 commit'"
 
       - name: Run unit tests
         run: |
@@ -176,7 +177,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev,otel]" ./client-sdk --only-binary aerospike-native \
             --extra-index-url "https://${user_enc}:${JF_OIDC_TOKEN}@artifact.aerospike.io/artifactory/api/pypi/${{ vars.JFROG_PROJECT }}-pypi-dev-local/simple/"
-          python -c "import inspect, aerospike_sdk.metrics.snapshot as snapshot; assert 'conn_type' in inspect.getsource(snapshot), 'installed aerospike-sdk is not the pinned CLIENT-OM-372 commit'"
+          python -c "import inspect, aerospike_sdk.metrics.snapshot as snapshot; assert '_SnapshotPolicy' in inspect.getsource(snapshot), 'installed aerospike-sdk is not the pinned CLIENT-OM-372 commit'"
 
       # AEROSPIKE_HOST stays unset. The suite starts Enterprise 8.2.0.0, the
       # second cluster, the collector, and Prometheus on its own.
