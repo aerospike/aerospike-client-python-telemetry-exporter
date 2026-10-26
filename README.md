@@ -112,8 +112,8 @@ drop the extra checkout and that check. `AEROSPIKE_HOST` stays unset, so
 the integration suite starts its own containers. Each test job uploads
 `junit.xml` and `pytest.log` to the Actions run for 90 days. A failed
 integration run also uploads the container logs. The workflow does not
-publish a wheel. The DEV release bundle workflows are added and have not
-been dispatched.
+publish a wheel. The DEV release bundle workflow is on `OM-373` and is
+not on `dev` or `main`. A `dry-run-*` tag runs that commit as a dry run.
 The files stay in this repository. Feature-branch testing passes
 `dry_run=true`. The manual default is `true`, so omitting it on a manual
 run stays a dry run and attaches the wheel to the Actions run. The command
@@ -130,7 +130,8 @@ The same list is the test catalog in `SHARED_DESIGN.md` under
 translation without mutation, no snapshot retention, injected failure.
 
 `tests/unit/otel/test_package.py` — importing OTel does not import
-`opentelemetry`, the root package does not export `OtelExporter`, sync
+`opentelemetry`, the root package does not export `OtelExporter` and
+exposes `__version__`, sync
 publish then `close` rejects another export, async publish, catalog conflict.
 
 `tests/unit/otel/test_multiple_exporters.py` — two exporter objects keep two
