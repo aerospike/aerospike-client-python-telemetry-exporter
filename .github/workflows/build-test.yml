@@ -181,7 +181,14 @@ jobs:
 
       # AEROSPIKE_HOST stays unset. The suite starts Enterprise 8.2.0.0, the
       # second cluster, the collector, and Prometheus on its own.
+      # Each cloud protocol runs only when its endpoint secret and the shared
+      # header secret are set. An empty secret skips that protocol. Fork pull
+      # requests do not receive these secrets.
       - name: Run integration tests
+        env:
+          OTEL_EXPORTER_OTLP_ENDPOINT: ${{ secrets.OTEL_EXPORTER_OTLP_ENDPOINT }}
+          OTEL_EXPORTER_OTLP_GRPC_ENDPOINT: ${{ secrets.OTEL_EXPORTER_OTLP_GRPC_ENDPOINT }}
+          OTEL_EXPORTER_OTLP_HEADERS: ${{ secrets.OTEL_EXPORTER_OTLP_HEADERS }}
         run: |
           set -o pipefail
           mkdir -p test-results

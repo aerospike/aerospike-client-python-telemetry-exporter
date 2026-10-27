@@ -21,6 +21,7 @@ the exporter once. The test waits on the client's real scheduler.
 from __future__ import annotations
 
 from datetime import timedelta
+import os
 import time
 
 import pytest
@@ -40,6 +41,9 @@ pytestmark = pytest.mark.integration
 # Shortened so this test can observe one real interval. A service would use
 # its own interval, often 30 seconds or more.
 _EXPORT_INTERVAL = timedelta(seconds=1)
+_OTLP_ENDPOINT = "OTEL_EXPORTER_OTLP_ENDPOINT"
+_OTLP_GRPC_ENDPOINT = "OTEL_EXPORTER_OTLP_GRPC_ENDPOINT"
+_OTLP_HEADERS = "OTEL_EXPORTER_OTLP_HEADERS"
 
 
 def _webapp_labels() -> dict[str, str]:
@@ -219,3 +223,146 @@ def test_one_exporter_keeps_two_clusters_independent(aerospike_server_two):
             cluster.disable_metrics()
             cluster.close()
         exporter.close()
+
+
+def _cloud_otlp(grpc: bool) -> tuple[str, dict[str, str]]:
+    """Endpoint and auth headers for one OTLP protocol, or skip that case."""
+    endpoint_var = _OTLP_GRPC_ENDPOINT if grpc else _OTLP_ENDPOINT
+    protocol = "gRPC" if grpc else "HTTP"
+    endpoint = os.environ.get(endpoint_var, "").strip()
+    raw_headers = os.environ.get(_OTLP_HEADERS, "").strip()
+    if not endpoint or not raw_headers:
+        pytest.skip(
+            f"set {endpoint_var} and {_OTLP_HEADERS} to send this webapp over {protocol}"
+        )
+    headers: dict[str, str] = {}
+    for item in raw_headers.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        name, separator, value = item.partition("=")
+        if not separator or not name.strip() or not value.strip():
+            pytest.fail(
+                f"{_OTLP_HEADERS} must be comma-separated key=value pairs, "
+                "for example api-key=<license>"
+            )
+        headers[name.strip()] = value.strip()
+    if not headers:
+        pytest.skip(
+            f"set {endpoint_var} and {_OTLP_HEADERS} to send this webapp over {protocol}"
+        )
+    return endpoint, headers
+
+
+def _cloud_provider(endpoint: str, headers: dict[str, str], *, grpc: bool):
+    """The webapp pipeline for one protocol, with the cloud auth header."""
+    if grpc:
+        from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (
+            OTLPMetricExporter,
+        )
+    else:
+        from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
+            OTLPMetricExporter,
+        )
+    from opentelemetry.sdk.metrics import (
+        Counter,
+        Histogram,
+        MeterProvider,
+        ObservableCounter,
+        ObservableGauge,
+        ObservableUpDownCounter,
+        UpDownCounter,
+    )
+    from opentelemetry.sdk.metrics.export import (
+        AggregationTemporality,
+        PeriodicExportingMetricReader,
+    )
+    from opentelemetry.sdk.resources import Resource
+
+    delta = AggregationTemporality.DELTA
+    reader = PeriodicExportingMetricReader(
+        OTLPMetricExporter(
+            endpoint=endpoint,
+            headers=headers,
+            preferred_temporality={
+                Counter: delta,
+                UpDownCounter: delta,
+                Histogram: delta,
+                ObservableCounter: delta,
+                ObservableUpDownCounter: delta,
+                ObservableGauge: AggregationTemporality.CUMULATIVE,
+            },
+        ),
+        export_interval_millis=1000,
+    )
+    return MeterProvider(
+        metric_readers=[reader],
+        resource=Resource.create({"service.name": "python-orders-service"}),
+    )
+
+
+class _CloudApp:
+    """The slice of ``OrdersWebapp`` that ``_snapshot_for`` reads."""
+
+    def __init__(self, exporter: OtelExporter) -> None:
+        self.exporter = exporter
+
+
+@pytest.mark.parametrize("grpc", [False, True], ids=["http", "grpc"])
+def test_webapp_sends_to_an_otlp_cloud_when_configured(grpc: bool):
+    """Push one order snapshot to a real OTLP cloud over HTTP and over gRPC.
+
+    HTTP reads ``OTEL_EXPORTER_OTLP_ENDPOINT``, for example
+    ``https://otlp.nr-data.net/v1/metrics``. gRPC reads
+    ``OTEL_EXPORTER_OTLP_GRPC_ENDPOINT``, for example
+    ``https://otlp.nr-data.net:4317``. Both read
+    ``OTEL_EXPORTER_OTLP_HEADERS``, for example ``api-key=<license>``.
+    CI passes the same names from Actions secrets. A missing endpoint or
+    header skips only that protocol. New Relic sees ``service.name``
+    ``python-orders-service``.
+    """
+    endpoint, headers = _cloud_otlp(grpc)
+    app_id = "orders-grpc" if grpc else "orders-http"
+    host, port = seed_host()
+    provider = _cloud_provider(endpoint, headers, grpc=grpc)
+    exporter = OtelExporter(provider)
+    cluster = None
+    try:
+        cluster = (
+            ClusterDefinition(host, port)
+            .app_id(app_id)
+            .with_system_settings(
+                SystemSettings(
+                    metrics=MetricsSettings(
+                        exporter=MetricsExporterType.CUSTOM,
+                        export_interval=_EXPORT_INTERVAL,
+                    )
+                )
+            )
+            .connect()
+        )
+    except Exception as exc:
+        exporter.close()
+        provider.shutdown()
+        pytest.skip(f"Aerospike seed {host}:{port} unavailable: {exc}")
+
+    try:
+        cluster.add_exporter(exporter)
+        cluster.enable_metrics(
+            MetricsPolicy(
+                operational_enabled=True,
+                usage_enabled=True,
+                labels=_webapp_labels(),
+            )
+        )
+        session = cluster.create_session()
+        key = DataSet.of(namespace(), "orders").id(42)
+        session.upsert(key).put({"sku": "sku-1", "qty": 1}).execute()
+        _snapshot_for(_CloudApp(exporter), app_id)
+        assert provider.force_flush(30000) is True
+    finally:
+        if cluster is not None:
+            cluster.disable_metrics()
+            cluster.close()
+        exporter.close()
+        provider.shutdown()

@@ -26,11 +26,24 @@ package only registers instruments on it. It does not create a resource, an
 OTLP exporter, a periodic reader, or a meter provider. The reader already on
 that provider sends OTLP later. A failed send does not raise from `export`,
 so the client keeps calling it. `close()` does not shut the provider down;
-it is what makes a later `export` raise. The earlier implementation that
+it is what makes a later `export` raise. A newer `aerospike-sdk` or
+OpenTelemetry release stays installed: the floors are `aerospike-sdk>=1.0.0`
+and OpenTelemetry `>=1.27.0`. If that release changes a call this package
+makes, `export()` lets the exception propagate. The client logs it on the
+metrics thread, keeps the webapp serving, and suspends this exporter after
+three consecutive failures. Swallowing the exception would record a
+successful export and drop the metrics with no log. A failure while
+constructing `OtelExporter(meter_provider)` happens on the webapp startup
+thread, before registration, so startup fails. The earlier implementation that
 built the pipeline is preserved on branch `OM-373-DONT-DELETE`. Install the
 backend with `pip install -e ".[otel]"`.
 Import it from `aerospike_client_telemetry.otel`. The top-level package does not
-load it.
+load it. The metrics log file stays the client SDK's one `MetricsWriter`.
+Later SDK work adds `report_format`. The default is `log`, the positional
+file written today; `jsonl` is opt-in and writes one canonical JSON object
+per line. The normal webapp selects `file` and `report_dir`, and sets
+`jsonl` only when it wants that document. This package
+does not implement a second writer or an `exporter: json` mode.
 
 ## Setup
 
@@ -109,11 +122,17 @@ pin and is absent from the published 1.0.0 release. `conn_type` is not on
 the pin. After `CLIENT-OM-372` merges, point `SDK_REF` at the SDK `dev`
 branch. When a released `aerospike-sdk` includes this snapshot contract,
 drop the extra checkout and that check. `AEROSPIKE_HOST` stays unset, so
-the integration suite starts its own containers. Each test job uploads
+the integration suite starts its own containers. The integration job passes
+`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_GRPC_ENDPOINT`, and
+`OTEL_EXPORTER_OTLP_HEADERS` from Actions secrets of the same names. HTTP
+runs when the first and the header secret are set. gRPC runs when the
+second and the header secret are set. An empty secret skips that protocol.
+Each test job uploads
 `junit.xml` and `pytest.log` to the Actions run for 90 days. A failed
 integration run also uploads the container logs. The workflow does not
-publish a wheel. The DEV release bundle workflow is on `OM-373` and is
-not on `dev` or `main`. A `dry-run-*` tag runs that commit as a dry run.
+publish a wheel. The DEV release bundle workflow is on `OM-373` through
+`f479aa2` and is not on `dev` or `main`. Tag `dry-run-om373-2` completed as
+a dry run and did not publish. A later `dry-run-*` tag does the same.
 The files stay in this repository. Feature-branch testing passes
 `dry_run=true`. The manual default is `true`, so omitting it on a manual
 run stays a dry run and attaches the wheel to the Actions run. The command
@@ -205,7 +224,14 @@ callback keeps connection series for the survivor only.
 
 `tests/integration/otel/test_webapp.py` — customer startup, an order write,
 operational and usage metrics, `client_app_ip` on the snapshot, and
-shutdown. A second case registers that one exporter on two clients,
+shutdown. When `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_HEADERS`
+are set, one case flushes that webapp to the cloud over HTTP. When
+`OTEL_EXPORTER_OTLP_GRPC_ENDPOINT` and the same header variable are set,
+another case flushes it over gRPC. A missing endpoint skips only that
+protocol. Both use service name `python-orders-service`. HTTP points carry
+`app_id` `orders-http` and gRPC points carry `orders-grpc`. A gRPC endpoint
+without a scheme, such as `otlp.nr-data.net:4317`, still uses TLS. A second
+case registers that one exporter on two clients,
 `telemetry-it` and `telemetry-it-two`, and each cluster keeps its own
 document.
 
