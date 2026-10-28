@@ -12,9 +12,9 @@
 
 """Hot-reload of metrics.labels in the SDK configuration file.
 
-A file that sets ``metrics.enabled`` re-applies the whole label map on the
-next reload. A file that never sets ``enabled`` leaves the running labels
-alone.
+A file that sets ``metrics.enabled`` owns the collection switch. A file that
+omits ``enabled`` leaves that switch under API control, while still applying
+its explicitly configured labels on reload.
 """
 
 from __future__ import annotations
@@ -114,7 +114,7 @@ def test_a_file_that_owns_metrics_replaces_labels_on_reload(tmp_path):
             exporter.close()
 
 
-def test_a_file_silent_on_enabled_does_not_change_running_labels(tmp_path):
+def test_a_file_silent_on_enabled_refreshes_running_labels(tmp_path):
     path = tmp_path / "sdk.yaml"
     path.write_text(_yaml({"environment": "prod"}, enabled=None))
     host, port = seed_host()
@@ -135,8 +135,8 @@ def test_a_file_silent_on_enabled_does_not_change_running_labels(tmp_path):
             _bump_mtime(str(path))
             time.sleep(2.5)
             latest = exporter.records[-1].labels
-            assert latest["environment"] == "from-code"
-            assert "another_label" not in latest
+            assert latest["environment"] == "prod"
+            assert latest["another_label"] == "value"
         finally:
             cluster.disable_metrics()
             cluster.close()

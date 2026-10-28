@@ -75,7 +75,10 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python: ["3.11", "3.14"]
+        # The pinned SDK needs a matching aerospike-native dev wheel. Its
+        # dev channel publishes 3.14+ wheels; the syntax job retains the
+        # exporter package's 3.11 floor check.
+        python: ["3.14", "3.15"]
       fail-fast: false
     steps:
       - name: Harden the runner (Audit all outbound calls)
