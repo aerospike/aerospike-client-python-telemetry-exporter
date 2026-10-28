@@ -102,7 +102,7 @@ jobs:
         id: jfrog
         uses: step-security/setup-jfrog-cli@3054b554c0fb4915b3d58847fb7730c593dbb934 # v5.0.0
         env:
-          JF_PROJECT: ${{ vars.JFROG_PROJECT }}
+          JF_PROJECT: ${{ vars.JFROG_PROJECT || 'database' }}
         with:
           oidc-provider-name: ${{ vars.OIDC_PROVIDER_NAME || 'gh-aerospike' }}
           oidc-audience: ${{ vars.OIDC_AUDIENCE || 'aerospike' }}
@@ -116,7 +116,7 @@ jobs:
           user_enc=$(python -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['JF_OIDC_USER'], safe=''))")
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev,otel]" ./client-sdk --only-binary aerospike-native \
-            --extra-index-url "https://${user_enc}:${JF_OIDC_TOKEN}@artifact.aerospike.io/artifactory/api/pypi/${{ vars.JFROG_PROJECT }}-pypi-dev-local/simple/"
+            --extra-index-url "https://${user_enc}:${JF_OIDC_TOKEN}@artifact.aerospike.io/artifactory/api/pypi/${{ vars.JFROG_PROJECT || 'database' }}-pypi-dev-local/simple/"
           python -c "import inspect, aerospike_sdk.metrics.snapshot as snapshot; assert '_SnapshotPolicy' in inspect.getsource(snapshot), 'installed aerospike-sdk is not the pinned CLIENT-OM-372 commit'"
 
       - name: Run unit tests
@@ -163,7 +163,7 @@ jobs:
         id: jfrog
         uses: step-security/setup-jfrog-cli@3054b554c0fb4915b3d58847fb7730c593dbb934 # v5.0.0
         env:
-          JF_PROJECT: ${{ vars.JFROG_PROJECT }}
+          JF_PROJECT: ${{ vars.JFROG_PROJECT || 'database' }}
         with:
           oidc-provider-name: ${{ vars.OIDC_PROVIDER_NAME || 'gh-aerospike' }}
           oidc-audience: ${{ vars.OIDC_AUDIENCE || 'aerospike' }}
@@ -177,7 +177,7 @@ jobs:
           user_enc=$(python -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['JF_OIDC_USER'], safe=''))")
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev,otel]" ./client-sdk --only-binary aerospike-native \
-            --extra-index-url "https://${user_enc}:${JF_OIDC_TOKEN}@artifact.aerospike.io/artifactory/api/pypi/${{ vars.JFROG_PROJECT }}-pypi-dev-local/simple/"
+            --extra-index-url "https://${user_enc}:${JF_OIDC_TOKEN}@artifact.aerospike.io/artifactory/api/pypi/${{ vars.JFROG_PROJECT || 'database' }}-pypi-dev-local/simple/"
           python -c "import inspect, aerospike_sdk.metrics.snapshot as snapshot; assert '_SnapshotPolicy' in inspect.getsource(snapshot), 'installed aerospike-sdk is not the pinned CLIENT-OM-372 commit'"
 
       # AEROSPIKE_HOST stays unset. The suite starts Enterprise 8.2.0.0, the
