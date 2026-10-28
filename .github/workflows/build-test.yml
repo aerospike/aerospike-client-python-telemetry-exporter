@@ -102,6 +102,7 @@ jobs:
         id: jfrog
         uses: step-security/setup-jfrog-cli@3054b554c0fb4915b3d58847fb7730c593dbb934 # v5.0.0
         env:
+          JF_URL: https://artifact.aerospike.io
           JF_PROJECT: ${{ vars.JFROG_PROJECT || 'database' }}
         with:
           oidc-provider-name: ${{ vars.OIDC_PROVIDER_NAME || 'gh-aerospike' }}
@@ -113,6 +114,8 @@ jobs:
           JF_OIDC_TOKEN: ${{ steps.jfrog.outputs.oidc-token }}
         run: |
           set -euo pipefail
+          : "${JF_OIDC_USER:?setup-jfrog-cli did not produce an OIDC username}"
+          : "${JF_OIDC_TOKEN:?setup-jfrog-cli did not produce an OIDC token}"
           user_enc=$(python -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['JF_OIDC_USER'], safe=''))")
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev,otel]" ./client-sdk --only-binary aerospike-native \
@@ -163,6 +166,7 @@ jobs:
         id: jfrog
         uses: step-security/setup-jfrog-cli@3054b554c0fb4915b3d58847fb7730c593dbb934 # v5.0.0
         env:
+          JF_URL: https://artifact.aerospike.io
           JF_PROJECT: ${{ vars.JFROG_PROJECT || 'database' }}
         with:
           oidc-provider-name: ${{ vars.OIDC_PROVIDER_NAME || 'gh-aerospike' }}
@@ -174,6 +178,8 @@ jobs:
           JF_OIDC_TOKEN: ${{ steps.jfrog.outputs.oidc-token }}
         run: |
           set -euo pipefail
+          : "${JF_OIDC_USER:?setup-jfrog-cli did not produce an OIDC username}"
+          : "${JF_OIDC_TOKEN:?setup-jfrog-cli did not produce an OIDC token}"
           user_enc=$(python -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['JF_OIDC_USER'], safe=''))")
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev,otel]" ./client-sdk --only-binary aerospike-native \
