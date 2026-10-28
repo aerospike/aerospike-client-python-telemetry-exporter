@@ -97,22 +97,12 @@ class _OtelExportState:
             raise TypeError("meter_provider is required")
         self.meter_provider = meter_provider
         self.registry = registry if registry is not None else ClientSnapshotRegistry()
-        self._closed = False
         _register_instruments(self.meter_provider.get_meter(_METER_NAME), self.registry)
 
     def publish(self, snapshot: Any) -> None:
         """Store the canonical document and drop the snapshot."""
-        if self._closed:
-            raise RuntimeError("exporter is closed")
         document = snapshot.to_canonical_dict()
         self.registry.replace(_client_key(document), document)
-
-    def close(self) -> None:
-        """Mark the exporter closed. The client SDK does not call this.
-
-        The webapp's meter provider is left running.
-        """
-        self._closed = True
 
 
 class OtelExporter(_OtelExportState):
@@ -124,7 +114,12 @@ class OtelExporter(_OtelExportState):
 
 
 class AsyncOtelExporter(_OtelExportState):
-    """Async OpenTelemetry exporter for ``aerospike_sdk.Cluster``."""
+    """Async OpenTelemetry exporter for ``aerospike_sdk.Cluster``.
+
+    The client runs this on its metrics-owned event loop. ``export`` only
+    copies the canonical document into the registry. It does not use asyncio
+    objects from the application's event loop.
+    """
 
     async def export(self, snapshot: Any) -> None:
         """Publish one snapshot to the registry."""

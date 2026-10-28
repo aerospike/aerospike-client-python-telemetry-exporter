@@ -106,7 +106,6 @@ def _connect(seed: str, app_id: str, exporter: OtelExporter, provider, *, altern
             .connect()
         )
     except Exception as exc:
-        exporter.close()
         provider.shutdown()
         pytest.skip(f"Aerospike seed {seed} unavailable: {exc}")
 
@@ -184,20 +183,20 @@ def test_metrics_keep_flowing_when_the_only_server_stops(monkeypatch):
             assert row["command_count"] == before
 
         names, node_labels = _published(reader)
-        assert "aerospike_client_total_nodes" in names
-        assert "aerospike_client_invalid_node_count" in names
-        assert "aerospike_client_open_connections" in names
-        assert "aerospike_client_recover_queue_size" in names
-        assert "aerospike_client_command_count" in names
-        assert "aerospike_client_cpu_percent" in names
-        assert "aerospike_client_memory_bytes" in names
-        assert "aerospike_client_feature_usage" in names
-        assert "aerospike_client_node_connections_in_pool" in names
+        assert "aerospike.client.cluster.total_nodes" in names
+        assert "aerospike.client.cluster.invalid_node_count" in names
+        assert "aerospike.client.cluster.open_connections" in names
+        assert "aerospike.client.cluster.recover_queue_size" in names
+        assert "aerospike.client.cluster.command_count" in names
+        assert "aerospike.client.cluster.cpu_percent" in names
+        assert "aerospike.client.cluster.memory_bytes" in names
+        assert "aerospike.client.feature.api_blocking" in names
+        assert "aerospike.client.node.connections_in_pool" in names
         assert len(node_labels) == 1
         collected = _collected(reader)
-        assert collected["aerospike_client_total_nodes"] == ("aerospike.client", 1)
-        assert collected["aerospike_client_invalid_node_count"] == ("aerospike.client", 0)
-        assert collected["aerospike_client_command_count"][1] == before
+        assert collected["aerospike.client.cluster.total_nodes"] == ("aerospike.client", 1)
+        assert collected["aerospike.client.cluster.invalid_node_count"] == ("aerospike.client", 0)
+        assert collected["aerospike.client.cluster.command_count"][1] == before
     finally:
         try:
             cluster.disable_metrics()
@@ -207,7 +206,6 @@ def test_metrics_keep_flowing_when_the_only_server_stops(monkeypatch):
             cluster.close()
         except Exception:
             pass
-        exporter.close()
         provider.shutdown()
         try:
             container.stop()
@@ -379,11 +377,11 @@ def test_one_node_of_a_two_node_cluster_drops_out_of_the_callback(monkeypatch):
         assert survivor_host == survivor[2]
 
         names, node_labels = _published(reader)
-        assert "aerospike_client_total_nodes" in names
-        assert "aerospike_client_invalid_node_count" in names
-        assert "aerospike_client_command_count" in names
-        assert "aerospike_client_node_connections_in_pool" in names
-        assert _collected(reader)["aerospike_client_total_nodes"][1] == 1
+        assert "aerospike.client.cluster.total_nodes" in names
+        assert "aerospike.client.cluster.invalid_node_count" in names
+        assert "aerospike.client.cluster.command_count" in names
+        assert "aerospike.client.node.connections_in_pool" in names
+        assert _collected(reader)["aerospike.client.cluster.total_nodes"][1] == 1
         assert len(node_labels) == 1
     finally:
         if cluster is not None:
@@ -395,6 +393,5 @@ def test_one_node_of_a_two_node_cluster_drops_out_of_the_callback(monkeypatch):
                 cluster.close()
             except Exception:
                 pass
-        exporter.close()
         provider.shutdown()
         _stop_pair(*started)

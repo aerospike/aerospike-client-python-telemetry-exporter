@@ -73,12 +73,10 @@ def _wait(predicate, message: str) -> None:
     raise AssertionError(message)
 
 
-def _shutdown(cluster, *exporters) -> None:
+def _shutdown(cluster) -> None:
     if cluster is not None:
         cluster.disable_metrics()
         cluster.close()
-    for exporter in exporters:
-        exporter.close()
 
 
 def test_two_otel_exporters_each_receive_the_snapshot():
@@ -89,8 +87,6 @@ def test_two_otel_exporters_each_receive_the_snapshot():
     try:
         cluster = _connect(host, port)
     except Exception as exc:
-        orders.close()
-        billing.close()
         pytest.skip(f"Aerospike seed {host}:{port} unavailable: {exc}")
 
     try:
@@ -111,7 +107,7 @@ def test_two_otel_exporters_each_receive_the_snapshot():
         assert billing_document["app_id"] == "orders-service"
         assert orders_document["client_type"] == "python-sdk"
     finally:
-        _shutdown(cluster, orders, billing)
+        _shutdown(cluster)
 
 
 def _metrics(exporter: _CountingExporter) -> dict:
@@ -127,8 +123,6 @@ def test_three_exporters_receive_the_same_metrics():
     try:
         cluster = _connect(host, port)
     except Exception as exc:
-        for exporter in exporters:
-            exporter.close()
         pytest.skip(f"Aerospike seed {host}:{port} unavailable: {exc}")
 
     try:
@@ -148,7 +142,7 @@ def test_three_exporters_receive_the_same_metrics():
         assert metrics[0]["command_count"] >= 1
         assert metrics[0]["nodes"]
     finally:
-        _shutdown(cluster, *exporters)
+        _shutdown(cluster)
 
 
 def test_same_otel_exporter_registered_twice_is_called_twice():
@@ -158,7 +152,6 @@ def test_same_otel_exporter_registered_twice_is_called_twice():
     try:
         cluster = _connect(host, port)
     except Exception as exc:
-        exporter.close()
         pytest.skip(f"Aerospike seed {host}:{port} unavailable: {exc}")
 
     try:
@@ -173,7 +166,7 @@ def test_same_otel_exporter_registered_twice_is_called_twice():
         document = exporter.registry.current(exporter.registry.client_keys()[0])
         assert document["app_id"] == "orders-service"
     finally:
-        _shutdown(cluster, exporter)
+        _shutdown(cluster)
 
 
 def test_two_clusters_each_register_a_different_exporter():
@@ -188,8 +181,6 @@ def test_two_clusters_each_register_a_different_exporter():
         for cluster in (orders, billing):
             if cluster is not None:
                 cluster.close()
-        orders_exporter.close()
-        billing_exporter.close()
         pytest.skip(f"Aerospike seed {host}:{port} unavailable: {exc}")
 
     try:
@@ -220,5 +211,3 @@ def test_two_clusters_each_register_a_different_exporter():
             if cluster is not None:
                 cluster.disable_metrics()
                 cluster.close()
-        orders_exporter.close()
-        billing_exporter.close()

@@ -22,8 +22,9 @@ permissions:
   id-token: write
 
 env:
-  # CLIENT-OM-372 at "feat(metrics): align revised snapshot contract".
-  SDK_REF: 34633121cdeba119f92e726a2cf3c76951ae87dc
+  # CLIENT-OM-372 at 17fa7f1. Async exporters always run on the metrics-owned
+  # loop. async_exporter_isolation is gone. _SnapshotPolicy is still present.
+  SDK_REF: 17fa7f145658278f72e89b1f66885b27bbc767ae
 
 jobs:
   lint:

@@ -24,14 +24,12 @@ def test_a_meter_provider_is_required():
         OtelExporter()
 
 
-def test_instruments_are_registered_and_close_leaves_the_provider_running():
+def test_instruments_are_registered_without_shutting_down_the_provider():
     provider = RecordingProvider()
     exporter = OtelExporter(provider)
-    try:
-        assert exporter.meter_provider is provider
-        assert provider.meter_name == "aerospike.client"
-        registered = set(provider.meter.counters) | set(provider.meter.gauges)
-        assert registered == {descriptor.name for descriptor in CATALOG}
-    finally:
-        exporter.close()
+
+    assert exporter.meter_provider is provider
+    assert provider.meter_name == "aerospike.client"
+    registered = set(provider.meter.counters) | set(provider.meter.gauges)
+    assert registered == {descriptor.name for descriptor in CATALOG}
     assert provider.shutdowns == 0

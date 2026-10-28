@@ -37,8 +37,8 @@ from opentelemetry.sdk.metrics.export import (
     PeriodicExportingMetricReader,
 )
 
-_COMMAND = "aerospike_client_command_count"
-_NODES = "aerospike_client_total_nodes"
+_COMMAND = "aerospike.client.cluster.command_count"
+_NODES = "aerospike.client.cluster.total_nodes"
 _WAIT_SECONDS = 3
 
 
@@ -144,7 +144,6 @@ def test_a_faster_reader_repeats_the_same_absolute_values():
         assert set(counts) <= {4, 9}
         assert {(row[_COMMAND], row[_NODES]) for row in moved} <= {(4, 2), (9, 3)}
     finally:
-        exporter.close()
         provider.shutdown()
 
 
@@ -175,5 +174,4 @@ def test_a_slower_reader_publishes_only_the_latest_snapshot():
         assert 4 in nodes
         assert 6 in nodes
     finally:
-        exporter.close()
         provider.shutdown()

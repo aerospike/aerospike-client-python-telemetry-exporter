@@ -1,267 +1,182 @@
-# Aerospike Client Telemetry Exporter
+# Aerospike Python client telemetry exporter
 
-External exporter for the Aerospike Python client. The client SDK collects
-metrics and pushes a `MetricsSnapshot` on its periodic scheduler. This package
-translates that snapshot. It does not collect metrics and it does not own the
-client lifecycle.
+External exporters for Aerospike Python client metrics. The client SDK collects
+the snapshot and calls `export()`. This package translates that snapshot. It
+does not open an OTLP connection and it does not choose HTTP or gRPC.
+
+The webapp builds the OpenTelemetry `MeterProvider`, including the reader and
+the OTLP exporter, and passes that provider in. HTTP and gRPC are whatever
+client the webapp attached. A cloud such as New Relic is that provider's
+endpoint and header (`api-key` for New Relic). This package never sees the key.
+
+```python
+from opentelemetry.sdk.metrics import MeterProvider
+
+from aerospike_client_telemetry.otel import OtelExporter
+
+exporter = OtelExporter(provider)
+```
+
+`AsyncOtelExporter` is the same contract for the async client. The client
+runs that call on its metrics-owned event loop. `export()` only stores the
+snapshot, so it does not use the application's event loop. The SDK no longer
+has `async_exporter_isolation`; async delivery is always isolated. Both
+exporters live in `aerospike_client_telemetry.otel`. Importing the root
+package does not load OpenTelemetry.
+
+Register the exporter in `CUSTOM` mode with `add_exporter`, then
+`enable_metrics`. On shutdown, disable metrics, close the cluster, and call
+`provider.shutdown()`. The exporter has no `close()`. The webapp owns the
+provider, and shutting it down drops the observable callbacks.
+
+`export()` stores the latest snapshot and returns. A failed OTLP send does not
+raise from `export()`. If a newer `aerospike-sdk` or OpenTelemetry release
+changes a call this package makes, `export()` lets that exception propagate.
+The client logs it on the metrics thread, keeps the webapp serving, and
+suspends this exporter after three consecutive failures. A failure while
+constructing `OtelExporter` happens on the startup thread, before registration,
+so startup fails.
+
+Install floors are `aerospike-sdk>=1.0.0` and, for the OpenTelemetry extra,
+`opentelemetry-*>=1.27.0`. A higher version that is already installed stays.
+`[otel]` is only needed when those libraries are not already in the environment.
+
+```bash
+pip install aerospike-client-telemetry-exporter
+pip install 'aerospike-client-telemetry-exporter[otel]'
+```
+
+Python 3.11 or newer.
+
+## What is exported
+
+The snapshot is one document per client. The identity is `client_type`,
+`client_version`, `cluster_name`, and `app_id`. Two clients that share those
+four values are one series. The webapp sets a distinct `app_id` per client.
+There is no `cluster` object in the document. Cluster-wide fields sit on the
+document next to `command_count`.
+
+`client_timeouts` is only on each namespace object,
+`nodes[].namespaces[].client_timeouts`. It is not repeated on the document.
+
+Tier 0 is published whenever metrics are enabled. Operational series are
+omitted when `operational_metrics_enabled` is false. Usage series are omitted
+when `usage_metrics_enabled` is false. A missing flag does not hide a series.
+
+Every metric is `aerospike.client.<context>.<stat>`. Cluster-wide series use
+`cluster`, for example `aerospike.client.cluster.command_count`. Node series
+use `node`, for example `aerospike.client.node.connections_in_use`. Namespace
+series use `namespace`. Feature counters use `feature`. A Prometheus exporter
+replaces each dot with an underscore, so the same series is
+`aerospike_client_<context>_<stat>` there.
+
+| Metric | Kind | Tier | Where it comes from |
+|---|---|---|---|
+| `aerospike.client.cluster.invalid_node_count` | counter | Tier 0 | Lifetime invalid-node events. Not the current node count. |
+| `aerospike.client.cluster.total_nodes` | gauge | Tier 0 | Current cluster size. |
+| `aerospike.client.cluster.recover_queue_size` | gauge | Tier 0 | Connections waiting in the recovery queue. |
+| `aerospike.client.cluster.delay_queue_timeout_count` | counter | Tier 0 | Stays 0 until the native snapshot reports it. |
+| `aerospike.client.cluster.validation_open_failure` | counter | Operational | Seed validation that never becomes a node. Stays 0 until native reports it. |
+| `aerospike.client.cluster.validation_tls_handshake_failure` | counter | Operational | Same, for TLS. |
+| `aerospike.client.cluster.validation_auth_failure` | counter | Operational | Same, for authentication. |
+| `aerospike.client.cluster.batch_partial_failure` | counter | Operational | Batch commands that finished with a partial failure. Stays 0 until native reports it. |
+| `aerospike.client.cluster.cpu_percent` | gauge | Operational | Process CPU. |
+| `aerospike.client.cluster.memory_bytes` | gauge | Operational | Process memory. |
+| `aerospike.client.cluster.latency_bucket` | counter | Operational | Cluster whole-call latency. Label `operation` is `read`, `write`, `batch`, or `query`. |
+| `aerospike.client.namespace.latency_bucket` | counter | Operational | Namespace RPC latency. Same `operation` label, plus the node labels and `ns`. |
+| `aerospike.client.node.conn_latency_bucket` | counter | Operational | Connection-acquisition latency on a node. |
+| `aerospike.client.namespace.client_timeouts` | counter | Operational | Client-side timeouts on that namespace. Stays 0 until native reports it. |
+| `aerospike.client.feature.api_blocking` | counter | Usage | One counter per feature. The other usage names follow the same pattern: `aerospike.client.feature.api_deferred`, `aerospike.client.feature.api_background`, `aerospike.client.feature.shape_point`, `aerospike.client.feature.shape_batch`, `aerospike.client.feature.shape_query`, `aerospike.client.feature.object_mapping_read`, `aerospike.client.feature.object_mapping_write`, `aerospike.client.feature.filter_ael`, `aerospike.client.feature.filter_exp`. |
+
+Latency buckets are cumulative counters with an `le` label. The snapshot field
+`latency_unit` is a label on those three latency metrics. An existing-node
+open, TLS, or auth failure stays on the node
+(`aerospike.client.node.connection_open_failure` and the TLS and auth names).
+That is a different series from the cluster validation counters above.
+
+Labels on every series include `cluster`, `client_type`, `client_version`,
+`app_id`, and `client_app_ip`. Node series add `server_node_id`,
+`server_node_address`, and `server_node_port`. Namespace series also add `ns`.
+A webapp label that uses one of those names is dropped. Exporter values win.
+
+The metrics log file is the client SDK `MetricsWriter`. A later SDK field,
+`report_format`, defaults to `log`, the positional file written today.
+`jsonl` is opt-in. This package does not ship a second writer.
+
+## Project structure
 
 ```text
-aerospike_client_telemetry/
-├── common/       shared catalog and per-client registry
-├── recording/    in-memory exporter for the periodic callback
-└── otel/         OpenTelemetry exporter; depends on the otel extra
-tests/
-├── unit/recording
-├── unit/otel
-├── integration/recording/{sync,async}
-├── integration/otel
-└── integration/docker          Aerospike server, collector, and Prometheus configs.
-                                Those containers share the Compose project aerospike-python-telemetry
+.
+├── aerospike_client_telemetry/
+│   ├── common/          # metric catalog and snapshot registry
+│   ├── recording/       # in-memory exporter for tests
+│   └── otel/            # OpenTelemetry exporter; optional import
+├── tests/
+│   ├── unit/
+│   └── integration/     # Aerospike, collector, and optional cloud
+├── pyproject.toml
+└── VERSION
 ```
 
-`common` has no vendor dependency. `recording` proves the client scheduler.
-`otel` publishes each canonical document into the registry and returns.
-The accepted contract is that the webapp passes a `MeterProvider` and this
-package only registers instruments on it. It does not create a resource, an
-OTLP exporter, a periodic reader, or a meter provider. The reader already on
-that provider sends OTLP later. A failed send does not raise from `export`,
-so the client keeps calling it. `close()` does not shut the provider down;
-it is what makes a later `export` raise. A newer `aerospike-sdk` or
-OpenTelemetry release stays installed: the floors are `aerospike-sdk>=1.0.0`
-and OpenTelemetry `>=1.27.0`. If that release changes a call this package
-makes, `export()` lets the exception propagate. The client logs it on the
-metrics thread, keeps the webapp serving, and suspends this exporter after
-three consecutive failures. Swallowing the exception would record a
-successful export and drop the metrics with no log. A failure while
-constructing `OtelExporter(meter_provider)` happens on the webapp startup
-thread, before registration, so startup fails. The earlier implementation that
-built the pipeline is preserved on branch `OM-373-DONT-DELETE`. Install the
-backend with `pip install -e ".[otel]"`.
-Import it from `aerospike_client_telemetry.otel`. The top-level package does not
-load it. The metrics log file stays the client SDK's one `MetricsWriter`.
-Later SDK work adds `report_format`. The default is `log`, the positional
-file written today; `jsonl` is opt-in and writes one canonical JSON object
-per line. The normal webapp selects `file` and `report_dir`, and sets
-`jsonl` only when it wants that document. This package
-does not implement a second writer or an `exporter: json` mode.
-
-## Setup
+## Development setup
 
 ```bash
-/opt/homebrew/bin/python3.14 -m venv .venv
+git clone https://github.com/aerospike/aerospike-client-python-telemetry-exporter.git
+cd aerospike-client-python-telemetry-exporter
+python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
-python -m pip install -e /Users/pmokrala/aerospike_source/aerospike-client-python-sdk
-python -m pip install -e ".[dev]"
-python -m pip show aerospike-sdk aerospike-native
+python -m pip install -e ../aerospike-client-python-sdk
+python -m pip install -e '.[dev,otel]'
 ```
 
-`aerospike-sdk` must report the local SDK checkout as its editable project
-location. The client branch used here is `CLIENT-OM-372`.
-
-## Snapshot contract
-
-The exporter consumes the revised `MetricsSnapshot.to_canonical_dict()` shape:
-
-- cluster totals and whole-call read/write/batch/query latency are top-level;
-- each node has one four-field pool, connection latency, and existing-node
-  open/TLS/auth failure counters;
-- each namespace has the error split, bytes, and RPC read/write/batch/query
-  latency summaries;
-- usage has only the approved short names;
-- `conn_type`, close reasons, pool exhaustion, and node error rate are absent.
-
-`operational_metrics_enabled is False` omits the operational series, and
-`usage_metrics_enabled is False` omits feature usage. A missing flag does not
-hide a series. Always-on gauges are published whenever a document is stored.
-`nodes_departed` stays on the document and is not published.
-
-Every series carries `client_type`, `client_version`, `cluster`, and `app_id`, plus `client_app_ip` when it can be detected. Customer labels from `MetricsPolicy.labels` are added unless the name collides with one of those. Node and namespace series add `server_node_id` (the server node id), `server_node_address`, `server_node_port`, and `ns`. Latency buckets add `le`. Feature usage adds `feature`.
-
-A running client picks up a new label map only when the SDK config file sets `metrics.enabled`. `true` replaces the whole map on the next snapshot: a label still in the file stays, a new one is added, and a label left out disappears. `false` turns collection off. A file that leaves `enabled` out does not change labels that were set in code.
-
-The SDK/native layer does not yet provide delay-queue timeout count, pre-node
-validation failures, namespace-attributed client timeouts, or authoritative
-batch-partial failures. The exporter does not invent zeroes for them.
-
-Async SDK clients preserve the application's event loop by default. For
-custom exporters that may block, the client can opt into a dedicated exporter
-event loop with `MetricsSettings(async_exporter_isolation=True)`. An exporter
-using that mode must not depend on asyncio objects bound to the application
-loop.
-
-## Tests
+`../aerospike-client-python-sdk` is a checkout of the Python client. Use a
+released `aerospike-sdk` when that release contains the snapshot this package
+reads.
 
 ```bash
-.venv/bin/python -m pytest tests/unit
-.venv/bin/python -m pytest tests/integration
-.venv/bin/python -m pytest tests/integration/otel -s
-.venv/bin/python -m pytest tests/integration/recording -s
+python -m pytest tests/unit
+python -m pytest tests/integration
 ```
 
-`-q` prints one dot per test. `-s` shows `print` output. Unit tests do not
-need a server. Integration tests start one Aerospike Enterprise `8.2.0.0`
-container for the session, on an ephemeral host port, and stop it afterward.
-The image's single-node evaluation feature key is used, so that container
-cannot form a two-node cluster. The one-node-down test starts its own
-Community Edition `8.2.0.0` pair for that reason. The container
-publishes that host port as its access address, so the client connects
-directly. Set `AEROSPIKE_HOST` to use a server that is already running
-instead. If that server advertises an address the client cannot reach, set
-`AEROSPIKE_USE_SERVICES_ALTERNATE=true`. Tests use the in-memory namespace
-`test`. The server also has `persist`, stored in a file. Tests
-register the exporter in `CUSTOM` mode and wait for the real scheduler. They
-do not call private timer methods.
+Integration tests start their own Aerospike containers when `AEROSPIKE_HOST`
+is unset. One webapp case sends a snapshot to a real OTLP endpoint. It runs
+only when the variables for that protocol are set. Otherwise that case is
+skipped.
 
-Pull requests to `dev` and `main` run `.github/workflows/build-test.yml`.
-That workflow lints with Ruff, compiles on Python 3.11, runs the unit tests
-on 3.11 and 3.14, and runs the integration tests on 3.14. It installs the
-client SDK from commit `3463312` on `CLIENT-OM-372` and checks that the
-installed snapshot module contains `_SnapshotPolicy`. That class is on the
-pin and is absent from the published 1.0.0 release. `conn_type` is not on
-the pin. After `CLIENT-OM-372` merges, point `SDK_REF` at the SDK `dev`
-branch. When a released `aerospike-sdk` includes this snapshot contract,
-drop the extra checkout and that check. `AEROSPIKE_HOST` stays unset, so
-the integration suite starts its own containers. The integration job passes
-`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_GRPC_ENDPOINT`, and
-`OTEL_EXPORTER_OTLP_HEADERS` from Actions secrets of the same names. HTTP
-runs when the first and the header secret are set. gRPC runs when the
-second and the header secret are set. An empty secret skips that protocol.
-Each test job uploads
-`junit.xml` and `pytest.log` to the Actions run for 90 days. A failed
-integration run also uploads the container logs. The workflow does not
-publish a wheel. The DEV release bundle workflow is on `OM-373` through
-`f479aa2` and is not on `dev` or `main`. Tag `dry-run-om373-2` completed as
-a dry run and did not publish. A later `dry-run-*` tag does the same.
-The files stay in this repository. Feature-branch testing passes
-`dry_run=true`. The manual default is `true`, so omitting it on a manual
-run stays a dry run and attaches the wheel to the Actions run. The command
-does not take `promote-to-test`. A push to `dev` publishes to JFrog DEV.
-The plan is `~/Downloads/om372_client_lib_python/RELEASE_ARTIFACTS.md`.
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp.nr-data.net/v1/metrics
+export OTEL_EXPORTER_OTLP_GRPC_ENDPOINT=otlp.nr-data.net:4317
+export OTEL_EXPORTER_OTLP_HEADERS=api-key=$NEW_RELIC_LICENSE_KEY
+python -m pytest tests/integration/otel/test_webapp.py::test_webapp_sends_to_an_otlp_cloud_when_configured -v
+```
 
-The same list is the test catalog in `SHARED_DESIGN.md` under
-`~/Downloads/om372_client_lib_python`. Open work is
-`~/Downloads/om372_client_lib_python/BACKLOG.md`.
+The HTTP URL includes `/v1/metrics`. The gRPC value is host and port `4317`.
+A missing scheme still uses TLS. Both cases use service name
+`python-orders-service`. HTTP points have `app_id` `orders-http`. gRPC points
+have `app_id` `orders-grpc`. Pull-request integration runs the same case when
+Actions secrets of those three names are set.
 
-### Unit
+## Contributing
 
-`tests/unit/recording/test_exporter.py` — sync and async recorder shape,
-translation without mutation, no snapshot retention, injected failure.
+Please read [CONTRIBUTING.md](CONTRIBUTING.md) for how to contribute to this repository.
 
-`tests/unit/otel/test_package.py` — importing OTel does not import
-`opentelemetry`, the root package does not export `OtelExporter` and
-exposes `__version__`, sync
-publish then `close` rejects another export, async publish, catalog conflict.
+## Security
 
-`tests/unit/otel/test_multiple_exporters.py` — two exporter objects keep two
-registries; two publishes on one exporter keep the latest document.
+For information on reporting security vulnerabilities, please see [SECURITY.md](SECURITY.md).
 
-`tests/unit/common/test_catalog.py` — one label rename for every metric,
-`client_app_ip` on every series,
-reserved webapp labels dropped, empty node or namespace names omitted,
-duplicate node names both yielded, departed nodes and non-numeric values
-omitted, revised latency scopes, existing-node connection failures, unmapped
-fields absent, a disabled operational or usage tier omits that tier and keeps
-the always-on gauges, and the registry keeps the latest document.
+## Repo tooling
 
-`tests/unit/otel/test_provider.py` — a meter provider is required. The
-exporter registers the catalog on that provider and `close()` does not shut
-it down.
-
-`tests/unit/otel/test_reader_interval.py` — a real periodic reader on a
-different clock from `export()`. A reader faster than the client push
-reports the same absolute command count and node count again, and does not
-double them. A reader slower than the client push publishes only the latest
-snapshot; the overwritten command count and node count are absent. The waits
-are shortened. The ratios match a 15-second reader against a 30-second push,
-and a 60-second reader against a 30-second push.
-
-### Integration
-
-`tests/integration/recording/sync/test_sync_periodic_export.py` and
-`tests/integration/recording/async/test_async_periodic_export.py` — one
-callback, two exporters on the same cycle, a failure does not stop the other
-exporter, disable stops callbacks without closing the exporter, re-enable
-resumes. The sync file also turns metrics on and off four times: each
-disable joins the export thread without an error, and the next enable
-starts a new one.
-
-`tests/integration/recording/sync/test_sync_json_export.py` — the recording
-exporter and a JSON writer receive the same cycle. The file is
-`build/recording-snapshot.json`.
-
-`tests/integration/recording/sync/test_dynamic_labels.py` — a config file
-that sets `metrics.enabled: true` replaces `metrics.labels` on reload.
-`environment` stays, `another_label` appears, and a label left out of the
-new map is gone. A file that never sets `enabled` leaves labels that were
-set in code unchanged.
-
-`tests/integration/otel/test_sdk_install.py` — public SDK version check, then
-one exporter registration.
-
-`tests/integration/otel/test_passed_provider.py` — a meter provider passed
-in. The exporter does not open OTLP. The webapp's own counter and gauge are
-collected from that same provider beside `aerospike_client_command_count`.
-Enable and disable start and stop the Aerospike export thread. The provider
-keeps reporting the last client `command_count` while that thread is stopped,
-and the webapp instruments keep moving. With metrics still enabled, turning
-operational metrics off and back on drops and restores command count while
-node count stays; turning feature usage off and back on does the same for
-`aerospike_client_feature_usage`.
-
-`tests/integration/otel/test_dynamic_operational.py` — the config file sets
-`metrics.enabled` and `extended.operational.enabled`. After operational
-metrics have arrived, rewriting that flag to false keeps collection on and
-the next callback omits command count. Node count stays.
-
-`tests/integration/otel/test_server_down.py` — metrics stay enabled. When the
-only server stops, the client keeps that seed while tend is refused, so the
-next snapshots still list it: node count 1, invalid count 0, empty
-`nodes_departed`, and the last command count. The callback keeps publishing
-that picture. When one node of a two-node cluster stops, that host appears
-once in `nodes_departed` and is not published. Node count becomes 1, and the
-callback keeps connection series for the survivor only.
-
-`tests/integration/otel/test_webapp.py` — customer startup, an order write,
-operational and usage metrics, `client_app_ip` on the snapshot, and
-shutdown. When `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_HEADERS`
-are set, one case flushes that webapp to the cloud over HTTP. When
-`OTEL_EXPORTER_OTLP_GRPC_ENDPOINT` and the same header variable are set,
-another case flushes it over gRPC. A missing endpoint skips only that
-protocol. Both use service name `python-orders-service`. HTTP points carry
-`app_id` `orders-http` and gRPC points carry `orders-grpc`. A gRPC endpoint
-without a scheme, such as `otlp.nr-data.net:4317`, still uses TLS. A second
-case registers that one exporter on two clients,
-`telemetry-it` and `telemetry-it-two`, and each cluster keeps its own
-document.
-
-`tests/integration/otel/test_collector.py` — the test builds the meter
-provider and its OTLP reader, once over HTTP/protobuf and once over gRPC,
-with operational and usage metrics on. It inserts, upserts, and then reads
-by point query, bin projection,
-exists, header, batch, set scan, and filtered query. Snapshot latency
-totals match those calls: read, write, batch, and query. Prometheus
-`command_count` matches the calls except single-key `exists`, which the
-SDK fast path does not count. Whole-call cluster read/write/batch/query,
-node connection-acquisition, and namespace RPC latency buckets arrive as
-cumulative `_bucket` series with `le`; each `+Inf` bucket equals its
-corresponding snapshot total. With `-s`, the test prints the comparison.
-
-`tests/integration/otel/test_identity_defaults.py` — `app_id` is the name
-that keeps a client unique on one cluster. Omitting it stores `not-set`,
-unless the client has a username, which is then used as `app_id`.
-Omitting `cluster_name` stores the server name. The SDK fills client type
-and version; connection mode is not part of the revised snapshot identity.
-Omitted labels are empty. Two clients on the default app id
-share one snapshot. Two app ids keep both. The same app id on two clusters
-stays two series, because `cluster` is on every series.
-
-`tests/integration/otel/test_multiple_exporters.py` — two OTel exporters each
-receive the snapshot, three exporters receive the same canonical document
-including its stable timestamp, registering the same exporter twice calls `export` twice while
-the registry keeps one document, and two clusters that each register a
-different exporter keep separate registries.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for details on repo tooling and development environment setup.
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE).
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
+
+## Support
+
+For questions or issues, please:
+
+- Open an issue on GitHub
+- Check existing documentation
+- Contact the maintainers

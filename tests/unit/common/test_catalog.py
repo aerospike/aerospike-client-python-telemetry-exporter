@@ -64,7 +64,9 @@ def test_one_label_rename_applies_to_every_metric():
     assert error_labels["server_node_id"] == "BB9"
     assert error_value == 7
     assert command.kind is InstrumentKind.COUNTER
+    assert CATALOG.by_source("invalid_node_count").kind is InstrumentKind.COUNTER
     assert CATALOG.by_source("total_nodes").kind is InstrumentKind.GAUGE
+    assert CATALOG.by_source("recover_queue_size").kind is InstrumentKind.GAUGE
 
 
 def test_client_app_ip_is_on_every_series(monkeypatch):
@@ -88,14 +90,19 @@ def test_latency_buckets_are_cumulative_observable_counters():
     document["nodes"][0]["namespaces"][0]["latencies"] = [
         {"type": "read", "bucket_counts": [1, 2, 3]}
     ]
-    descriptor = CATALOG.by_source("namespace.latency.read")
-    assert descriptor.name == "aerospike_client_namespace_latency_read_bucket"
+    document["latency_unit"] = "milliseconds"
+    descriptor = CATALOG.by_source("namespace.latency")
+    assert descriptor.name == "aerospike.client.namespace.latency_bucket"
     assert "le" in descriptor.labels
+    assert "operation" in descriptor.labels
+    assert "latency_unit" in descriptor.labels
     labels = {
         "server_node_id": "BB9",
         "server_node_address": "127.0.0.1",
         "server_node_port": "3000",
         "ns": "test",
+        "operation": "read",
+        "latency_unit": "milliseconds",
     }
     assert list(iter_metric_points(document, descriptor)) == [
         (1, {**labels, "le": "1"}),
@@ -110,7 +117,7 @@ def test_latency_shift_controls_histogram_upper_bounds():
     document["nodes"][0]["namespaces"][0]["latencies"] = [
         {"type": "read", "bucket_counts": [1, 1, 1, 1]}
     ]
-    descriptor = CATALOG.by_source("namespace.latency.read")
+    descriptor = CATALOG.by_source("namespace.latency")
     assert [labels["le"] for _, labels in iter_metric_points(document, descriptor)] == [
         "1",
         "8",
@@ -128,12 +135,14 @@ def test_cluster_and_node_latency_use_their_revised_scopes():
         "count": 5,
     }
 
-    cluster = CATALOG.by_source("cluster.latency.read")
+    cluster = CATALOG.by_source("cluster.latency")
     node = CATALOG.by_source("node.latency.conn")
+    assert cluster.name == "aerospike.client.cluster.latency_bucket"
+    assert node.name == "aerospike.client.node.conn_latency_bucket"
 
     assert list(iter_metric_points(document, cluster)) == [
-        (2, {"le": "1"}),
-        (5, {"le": "+Inf"}),
+        (2, {"operation": "read", "le": "1"}),
+        (5, {"operation": "read", "le": "+Inf"}),
     ]
     assert list(iter_metric_points(document, node)) == [
         (
@@ -183,6 +192,8 @@ def test_reserved_and_non_mapping_labels_are_dropped():
         "app_id": "spoofed-app",
         "feature": "spoofed-feature",
         "le": "spoofed-bound",
+        "operation": "spoofed-operation",
+        "latency_unit": "spoofed-unit",
         "client_type": "spoofed-type",
         "client_version": "spoofed-version",
         "node_address": "spoofed-address",
@@ -202,6 +213,8 @@ def test_reserved_and_non_mapping_labels_are_dropped():
         "ns",
         "feature",
         "le",
+        "operation",
+        "latency_unit",
         "node_address",
         "node_port",
         "server_node_address",
@@ -278,7 +291,6 @@ def test_unmapped_snapshot_fields_have_no_descriptor():
     for source in (
         "node.connections.open_failure",
         "node.error_rate",
-        "delay_queue_timeout_count",
         "nodes_departed",
     ):
         with pytest.raises(KeyError):
@@ -291,21 +303,31 @@ def test_disabled_tiers_omit_their_series_and_keep_the_always_on_gauges():
     document["usage_metrics_enabled"] = False
     document["command_retries"] = 3
     document["cpu_percent"] = 12.5
-    document["usage"] = {"feature.api.blocking": 4}
+    document["validation_open_failure"] = 1
+    document["delay_queue_timeout_count"] = 0
+    document["batch_partial_failure"] = 2
+    document["usage"] = {"blocking": 4}
     document["nodes"][0]["conn_latency"] = {"type": "conn", "bucket_counts": [1, 1]}
     document["nodes"][0]["connection_open_failure"] = 2
 
     assert list(iter_metric_points(document, CATALOG.by_source("command_count"))) == []
     assert list(iter_metric_points(document, CATALOG.by_source("command_retries"))) == []
     assert list(iter_metric_points(document, CATALOG.by_source("namespace.errors"))) == []
-    assert list(iter_metric_points(document, CATALOG.by_source("namespace.latency.read"))) == []
+    assert list(iter_metric_points(document, CATALOG.by_source("cluster.latency"))) == []
+    assert list(iter_metric_points(document, CATALOG.by_source("namespace.latency"))) == []
     assert list(iter_metric_points(document, CATALOG.by_source("node.latency.conn"))) == []
     assert (
         list(iter_metric_points(document, CATALOG.by_source("node.connection_open_failure"))) == []
     )
-    assert list(iter_metric_points(document, CATALOG.by_source("usage"))) == []
+    assert list(iter_metric_points(document, CATALOG.by_source("usage.blocking"))) == []
     assert list(iter_metric_points(document, CATALOG.by_source("total_nodes"))) == [(1, {})]
-    assert list(iter_metric_points(document, CATALOG.by_source("cpu_percent"))) == [(12.5, {})]
+    assert list(iter_metric_points(document, CATALOG.by_source("cpu_percent"))) == []
+    assert list(iter_metric_points(document, CATALOG.by_source("memory_bytes"))) == []
+    assert list(iter_metric_points(document, CATALOG.by_source("validation_open_failure"))) == []
+    assert list(iter_metric_points(document, CATALOG.by_source("batch_partial_failure"))) == []
+    assert list(iter_metric_points(document, CATALOG.by_source("delay_queue_timeout_count"))) == [
+        (0, {})
+    ]
     assert list(iter_metric_points(document, CATALOG.by_source("node.connections.opened"))) == [
         (
             2,
@@ -319,11 +341,20 @@ def test_disabled_tiers_omit_their_series_and_keep_the_always_on_gauges():
 
     document["operational_metrics_enabled"] = True
     assert list(iter_metric_points(document, CATALOG.by_source("command_count"))) == [(4, {})]
-    assert list(iter_metric_points(document, CATALOG.by_source("usage"))) == []
-    document["usage_metrics_enabled"] = True
-    assert list(iter_metric_points(document, CATALOG.by_source("usage"))) == [
-        (4, {"feature": "feature.api.blocking"})
+    assert list(iter_metric_points(document, CATALOG.by_source("cpu_percent"))) == [(12.5, {})]
+    assert list(iter_metric_points(document, CATALOG.by_source("validation_open_failure"))) == [
+        (1, {})
     ]
+    assert list(iter_metric_points(document, CATALOG.by_source("batch_partial_failure"))) == [
+        (2, {})
+    ]
+    assert list(iter_metric_points(document, CATALOG.by_source("delay_queue_timeout_count"))) == [
+        (0, {})
+    ]
+    assert list(iter_metric_points(document, CATALOG.by_source("usage.blocking"))) == []
+    document["usage_metrics_enabled"] = True
+    assert list(iter_metric_points(document, CATALOG.by_source("usage.blocking"))) == [(4, {})]
+    assert CATALOG.by_source("usage.blocking").name == "aerospike.client.feature.api_blocking"
 
 
 def test_registry_keeps_the_latest_document_for_an_identity():

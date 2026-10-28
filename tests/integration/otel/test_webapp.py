@@ -14,8 +14,8 @@
 
 ``OrdersWebapp`` is the application. It builds one exporter, connects with
 ``CUSTOM`` mode, registers that exporter, serves a request, then shuts down
-in the order the application owns: disable metrics, close the cluster, close
-the exporter once. The test waits on the client's real scheduler.
+in the order the application owns: disable metrics, close the cluster, shut
+down the meter provider. The test waits on the client's real scheduler.
 """
 
 from __future__ import annotations
@@ -95,7 +95,7 @@ class OrdersWebapp:
             self.cluster.disable_metrics()
             self.cluster.close()
             self.cluster = None
-        self.exporter.close()
+        self.exporter.meter_provider.shutdown()
 
 
 def _connect(exporter: OtelExporter, host: str, port: int):
@@ -222,7 +222,6 @@ def test_one_exporter_keeps_two_clusters_independent(aerospike_server_two):
         for cluster in clusters:
             cluster.disable_metrics()
             cluster.close()
-        exporter.close()
 
 
 def _cloud_otlp(grpc: bool) -> tuple[str, dict[str, str]]:
@@ -342,7 +341,6 @@ def test_webapp_sends_to_an_otlp_cloud_when_configured(grpc: bool):
             .connect()
         )
     except Exception as exc:
-        exporter.close()
         provider.shutdown()
         pytest.skip(f"Aerospike seed {host}:{port} unavailable: {exc}")
 
@@ -364,5 +362,4 @@ def test_webapp_sends_to_an_otlp_cloud_when_configured(grpc: bool):
         if cluster is not None:
             cluster.disable_metrics()
             cluster.close()
-        exporter.close()
         provider.shutdown()

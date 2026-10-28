@@ -167,7 +167,14 @@ def _wait_for_metric(path: Path, name: str, container) -> str:
     )
 
 
+def _prometheus_name(name: str) -> str:
+    """The collector's Prometheus exporter replaces dots with underscores."""
+    return name.replace(".", "_")
+
+
 def _query_prometheus(port: int) -> list[dict]:
+    # Dots become underscores: aerospike.client.cluster.command_count
+    # is aerospike_client_cluster_command_count.
     query = '{__name__=~"aerospike_client_.+"}'
     url = f"http://127.0.0.1:{port}/api/v1/query?{urlencode({'query': query})}"
     with urlopen(url, timeout=2) as response:
@@ -315,7 +322,7 @@ def _run_counted_workload(session, dataset) -> _Tally:
 
 def _command_count(series: list[dict]) -> float:
     for sample in series:
-        if sample["metric"].get("__name__") == "aerospike_client_command_count":
+        if sample["metric"].get("__name__") == "aerospike_client_cluster_command_count":
             return float(sample["value"][1])
     return 0
 
@@ -352,23 +359,28 @@ def _latency_count(document: dict, group: str, namespace_name: str) -> int:
     return total
 
 
+_FEATURE_METRICS = {
+    "blocking": "aerospike_client_feature_api_blocking",
+    "shape_point": "aerospike_client_feature_shape_point",
+    "shape_batch": "aerospike_client_feature_shape_batch",
+    "shape_query": "aerospike_client_feature_shape_query",
+}
+
+
 def _feature_count(series: list[dict], feature: str) -> float:
+    name = _FEATURE_METRICS[feature]
     for sample in series:
-        labels = sample["metric"]
-        if (
-            labels.get("__name__") == "aerospike_client_feature_usage"
-            and labels.get("feature") == feature
-        ):
+        if sample["metric"].get("__name__") == name:
             return float(sample["value"][1])
     return 0.0
 
 
 def _latency_bucket_count(series: list[dict], group: str, namespace_name: str, le: str) -> float:
-    name = f"aerospike_client_namespace_latency_{group}_bucket"
     return sum(
         float(sample["value"][1])
         for sample in series
-        if sample["metric"].get("__name__") == name
+        if sample["metric"].get("__name__") == "aerospike_client_namespace_latency_bucket"
+        and sample["metric"].get("operation") == group
         and sample["metric"].get("ns") == namespace_name
         and sample["metric"].get("le") == le
     )
@@ -378,7 +390,7 @@ def _print_coverage(series: list[dict], document: dict, tally: _Tally, namespace
     by_name: dict[str, list[dict]] = {}
     for sample in series:
         by_name.setdefault(sample["metric"].get("__name__", ""), []).append(sample)
-    catalog_names = {descriptor.name for descriptor in CATALOG}
+    catalog_names = {_prometheus_name(descriptor.name) for descriptor in CATALOG}
     received = set(by_name) & catalog_names
     missing = sorted(catalog_names - received)
     read_seen = _latency_count(document, "read", namespace_name)
@@ -412,16 +424,6 @@ def _print_coverage(series: list[dict], document: dict, tally: _Tally, namespace
     ]
     for name in sorted(by_name):
         samples = by_name[name]
-        if name == "aerospike_client_feature_usage":
-            features = ", ".join(
-                f"{sample['metric'].get('feature')}={sample['value'][1]}"
-                for sample in sorted(
-                    samples,
-                    key=lambda sample: sample["metric"].get("feature", ""),
-                )
-            )
-            lines.append(f"  {name}  {features}")
-            continue
         total = sum(float(sample["value"][1]) for sample in samples)
         lines.append(f"  {name}  {total:g}  series={len(samples)}")
     lines.append("")
@@ -483,7 +485,6 @@ def test_webapp_pushes_a_client_metric_to_the_collector(otel_collector, grpc):
             .connect()
         )
     except Exception as exc:
-        exporter.close()
         provider.shutdown()
         pytest.skip(f"Aerospike seed {host}:{port} unavailable: {exc}")
 
@@ -530,7 +531,7 @@ def test_webapp_pushes_a_client_metric_to_the_collector(otel_collector, grpc):
         assert document["operational_metrics_enabled"] is True
         assert document["usage_metrics_enabled"] is True
 
-        payload = _wait_for_metric(metrics, "aerospike_client_command_count", container)
+        payload = _wait_for_metric(metrics, "aerospike.client.cluster.command_count", container)
         assert "orders-service" in payload
         assert "telemetry-it" in payload
         assert "prod" in payload
@@ -541,7 +542,7 @@ def test_webapp_pushes_a_client_metric_to_the_collector(otel_collector, grpc):
         command = next(
             sample
             for sample in series
-            if sample["metric"].get("__name__") == "aerospike_client_command_count"
+            if sample["metric"].get("__name__") == "aerospike_client_cluster_command_count"
         )
         assert command["metric"]["app_id"] == "orders-service"
         assert command["metric"]["cluster"] == "telemetry-it"
@@ -561,23 +562,44 @@ def test_webapp_pushes_a_client_metric_to_the_collector(otel_collector, grpc):
         assert _latency_bucket_count(series, "write", namespace_name, "+Inf") == tally.write_calls
         assert _latency_bucket_count(series, "batch", namespace_name, "+Inf") == tally.batch_calls
         assert _latency_bucket_count(series, "query", namespace_name, "+Inf") == tally.query_calls
+        read_bucket = next(
+            sample
+            for sample in series
+            if sample["metric"].get("__name__") == "aerospike_client_namespace_latency_bucket"
+            and sample["metric"].get("operation") == "read"
+            and sample["metric"].get("ns") == namespace_name
+            and sample["metric"].get("le") == "+Inf"
+        )
+        assert read_bucket["metric"]["latency_unit"] in {"milliseconds", "microseconds"}
 
         received = {sample["metric"].get("__name__") for sample in series}
-        catalog_names = {descriptor.name for descriptor in CATALOG}
+        catalog_names = {_prometheus_name(descriptor.name) for descriptor in CATALOG}
         missing = catalog_names - received
-        assert missing == set()
-        features = {
-            sample["metric"].get("feature")
-            for sample in series
-            if sample["metric"].get("__name__") == "aerospike_client_feature_usage"
-        }
-        assert "blocking" in features
-        assert "shape_point" in features
-        assert "shape_batch" in features
-        assert "shape_query" in features
+        # These stay 0 until native fills them. An older SDK omits the fields,
+        # so the callback publishes nothing and Prometheus has no series.
+        pending = set()
+        for field, name in (
+            ("delay_queue_timeout_count", "aerospike_client_cluster_delay_queue_timeout_count"),
+            ("validation_open_failure", "aerospike_client_cluster_validation_open_failure"),
+            (
+                "validation_tls_handshake_failure",
+                "aerospike_client_cluster_validation_tls_handshake_failure",
+            ),
+            ("validation_auth_failure", "aerospike_client_cluster_validation_auth_failure"),
+            ("batch_partial_failure", "aerospike_client_cluster_batch_partial_failure"),
+        ):
+            if field not in document:
+                pending.add(name)
+        namespaces = [
+            namespace_doc
+            for node in document.get("nodes") or []
+            for namespace_doc in node.get("namespaces") or []
+        ]
+        if not namespaces or all("client_timeouts" not in item for item in namespaces):
+            pending.add("aerospike_client_namespace_client_timeouts")
+        assert missing <= pending
     finally:
         if cluster is not None:
             cluster.disable_metrics()
             cluster.close()
-        exporter.close()
         provider.shutdown()

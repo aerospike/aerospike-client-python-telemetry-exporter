@@ -97,8 +97,8 @@ def test_a_file_reload_drops_operational_metrics(tmp_path, monkeypatch):
                 ),
             )
             collected = _collected(reader)
-            assert collected["aerospike_client_command_count"][0] == "aerospike.client"
-            assert "aerospike_client_total_nodes" in collected
+            assert collected["aerospike.client.cluster.command_count"][0] == "aerospike.client"
+            assert "aerospike.client.cluster.total_nodes" in collected
 
             path.write_text(_yaml(operational=False))
             _bump_mtime(str(path))
@@ -112,9 +112,8 @@ def test_a_file_reload_drops_operational_metrics(tmp_path, monkeypatch):
             )
             assert cluster.metrics_enabled() is True
             collected = _collected(reader)
-            assert "aerospike_client_command_count" not in collected
-            assert "aerospike_client_total_nodes" in collected
+            assert "aerospike.client.cluster.command_count" not in collected
+            assert "aerospike.client.cluster.total_nodes" in collected
         finally:
             cluster.close()
-            exporter.close()
             provider.shutdown()

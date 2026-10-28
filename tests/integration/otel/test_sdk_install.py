@@ -80,4 +80,3 @@ def test_installed_sdk_pushes_a_snapshot_to_the_exporter():
         cluster.disable_metrics()
     finally:
         cluster.close()
-        exporter.close()

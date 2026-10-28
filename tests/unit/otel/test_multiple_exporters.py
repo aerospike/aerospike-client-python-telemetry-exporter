@@ -43,31 +43,24 @@ def test_two_exporters_keep_separate_registries():
     orders = OtelExporter(RecordingProvider())
     billing = OtelExporter(RecordingProvider())
 
-    try:
-        orders.export(snapshot)
-        billing.export(snapshot)
+    orders.export(snapshot)
+    billing.export(snapshot)
 
-        assert orders is not billing
-        assert orders.registry is not billing.registry
-        assert orders.meter_provider is not billing.meter_provider
-        assert orders.registry.current(_KEY) is document
-        assert billing.registry.current(_KEY) is document
-        assert orders.registry.client_keys() == (_KEY,)
-        assert billing.registry.client_keys() == (_KEY,)
-    finally:
-        orders.close()
-        billing.close()
+    assert orders is not billing
+    assert orders.registry is not billing.registry
+    assert orders.meter_provider is not billing.meter_provider
+    assert orders.registry.current(_KEY) is document
+    assert billing.registry.current(_KEY) is document
+    assert orders.registry.client_keys() == (_KEY,)
+    assert billing.registry.client_keys() == (_KEY,)
 
 
 def test_two_publishes_on_one_exporter_keep_the_latest_document():
     exporter = OtelExporter(RecordingProvider())
-    try:
-        exporter.export(_Snapshot(_document("first")))
-        latest = _document("second")
-        exporter.export(_Snapshot(latest))
+    exporter.export(_Snapshot(_document("first")))
+    latest = _document("second")
+    exporter.export(_Snapshot(latest))
 
-        assert exporter.registry.client_keys() == (_KEY,)
-        assert exporter.registry.current(_KEY) is latest
-        assert exporter.registry.current(_KEY)["marker"] == "second"
-    finally:
-        exporter.close()
+    assert exporter.registry.client_keys() == (_KEY,)
+    assert exporter.registry.current(_KEY) is latest
+    assert exporter.registry.current(_KEY)["marker"] == "second"

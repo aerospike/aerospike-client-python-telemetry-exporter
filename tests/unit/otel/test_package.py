@@ -71,9 +71,6 @@ def test_otel_exporters_publish_without_retaining_the_snapshot():
     stored = exporter.registry.current("python-sdk\n1.0.0\nlocal\ncheckout")
     assert stored is document
     assert stored["app_id"] == "checkout"
-    exporter.close()
-    with pytest.raises(RuntimeError, match="closed"):
-        exporter.export(snapshot)
 
 
 @pytest.mark.asyncio
@@ -82,7 +79,6 @@ async def test_async_otel_exporter_matches_the_async_protocol():
     check_exporter(exporter, awaitable=True)
     await exporter.export(_Snapshot({"client_type": "python-sdk", "app_id": "checkout"}))
     assert exporter.registry.client_keys() == ("python-sdk\n\n\ncheckout",)
-    exporter.close()
 
 
 def test_catalog_rejects_a_conflicting_descriptor():

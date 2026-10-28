@@ -81,13 +81,12 @@ def _wait(exporter: OtelExporter, predicate, message: str) -> dict[str, dict]:
     raise AssertionError(message)
 
 
-def _shutdown(exporter: OtelExporter, *clusters) -> None:
+def _shutdown(*clusters) -> None:
     for cluster in clusters:
         if cluster is None:
             continue
         cluster.disable_metrics()
         cluster.close()
-    exporter.close()
 
 
 def test_omitted_app_id_is_not_set():
@@ -97,7 +96,6 @@ def test_omitted_app_id_is_not_set():
     try:
         cluster = _connect(host, port)
     except Exception as exc:
-        exporter.close()
         pytest.skip(f"Aerospike seed {host}:{port} unavailable: {exc}")
 
     try:
@@ -122,7 +120,7 @@ def test_omitted_app_id_is_not_set():
             )
         ]
     finally:
-        _shutdown(exporter, cluster)
+        _shutdown(cluster)
 
 
 def test_omitted_app_id_uses_the_username():
@@ -137,7 +135,6 @@ def test_omitted_app_id_uses_the_username():
             .connect()
         )
     except Exception as exc:
-        exporter.close()
         pytest.skip(f"Aerospike seed {host}:{port} unavailable: {exc}")
 
     try:
@@ -153,7 +150,7 @@ def test_omitted_app_id_uses_the_username():
         assert document["app_id"] == "orders-user"
         assert "orders-user" in next(iter(documents))
     finally:
-        _shutdown(exporter, cluster)
+        _shutdown(cluster)
 
 
 def test_omitted_cluster_name_is_the_server_name():
@@ -163,7 +160,6 @@ def test_omitted_cluster_name_is_the_server_name():
     try:
         cluster = _connect(host, port, app_id="cluster-name-default")
     except Exception as exc:
-        exporter.close()
         pytest.skip(f"Aerospike seed {host}:{port} unavailable: {exc}")
 
     try:
@@ -179,7 +175,7 @@ def test_omitted_cluster_name_is_the_server_name():
         assert cluster.cluster_name
         assert document["cluster_name"] == cluster.cluster_name
     finally:
-        _shutdown(exporter, cluster)
+        _shutdown(cluster)
 
 
 def test_sdk_fills_client_type_and_version():
@@ -189,7 +185,6 @@ def test_sdk_fills_client_type_and_version():
     try:
         cluster = _connect(host, port, app_id="sdk-identity")
     except Exception as exc:
-        exporter.close()
         pytest.skip(f"Aerospike seed {host}:{port} unavailable: {exc}")
 
     try:
@@ -206,7 +201,7 @@ def test_sdk_fills_client_type_and_version():
         assert document["client_version"] == aerospike_sdk.__version__
         assert document["client_version"] != "0.0.0"
     finally:
-        _shutdown(exporter, cluster)
+        _shutdown(cluster)
 
 
 def test_omitted_labels_are_empty():
@@ -216,7 +211,6 @@ def test_omitted_labels_are_empty():
     try:
         cluster = _connect(host, port, app_id="labels-default")
     except Exception as exc:
-        exporter.close()
         pytest.skip(f"Aerospike seed {host}:{port} unavailable: {exc}")
 
     try:
@@ -231,7 +225,7 @@ def test_omitted_labels_are_empty():
         document = next(iter(documents.values()))
         assert document["labels"] == {}
     finally:
-        _shutdown(exporter, cluster)
+        _shutdown(cluster)
 
 
 def test_two_clients_using_the_default_app_id_keep_one_snapshot():
@@ -241,7 +235,6 @@ def test_two_clients_using_the_default_app_id_keep_one_snapshot():
     try:
         first = _connect(host, port)
     except Exception as exc:
-        exporter.close()
         pytest.skip(f"Aerospike seed {host}:{port} unavailable: {exc}")
 
     try:
@@ -268,7 +261,7 @@ def test_two_clients_using_the_default_app_id_keep_one_snapshot():
         assert document["app_id"] == "not-set"
         assert document["labels"] == {"owner": "beta"}
     finally:
-        _shutdown(exporter, first, second)
+        _shutdown(first, second)
 
 
 def test_two_clients_with_different_app_ids_keep_both_snapshots():
@@ -279,7 +272,7 @@ def test_two_clients_with_different_app_ids_keep_both_snapshots():
         orders = _connect(host, port, app_id="orders-service")
         billing = _connect(host, port, app_id="billing-service")
     except Exception as exc:
-        _shutdown(exporter, orders, billing)
+        _shutdown(orders, billing)
         pytest.skip(f"Aerospike seed {host}:{port} unavailable: {exc}")
 
     try:
@@ -299,4 +292,4 @@ def test_two_clients_with_different_app_ids_keep_both_snapshots():
             "billing-service",
         }
     finally:
-        _shutdown(exporter, orders, billing)
+        _shutdown(orders, billing)

@@ -80,11 +80,11 @@ def _wait_for_value(reader: InMemoryMetricReader, predicate) -> float:
     deadline = time.monotonic() + CALLBACK_TIMEOUT_SECONDS
     last = None
     while time.monotonic() < deadline:
-        last = _metric_value(reader, "aerospike_client_command_count")
+        last = _metric_value(reader, "aerospike.client.cluster.command_count")
         if last is not None and predicate(last):
             return last
         time.sleep(0.05)
-    raise AssertionError(f"aerospike_client_command_count is {last}")
+    raise AssertionError(f"aerospike.client.cluster.command_count is {last}")
 
 
 def _write(cluster, dataset) -> None:
@@ -128,12 +128,12 @@ def _wait_for_client_count(reader: InMemoryMetricReader, predicate) -> dict[str,
     last = None
     while time.monotonic() < deadline:
         collected = _collected(reader)
-        client = collected.get("aerospike_client_command_count")
+        client = collected.get("aerospike.client.cluster.command_count")
         last = None if client is None else client[1]
         if last is not None and predicate(last):
             return collected
         time.sleep(0.05)
-    raise AssertionError(f"aerospike_client_command_count is {last}")
+    raise AssertionError(f"aerospike.client.cluster.command_count is {last}")
 
 
 def _connect(app_id: str, exporter: OtelExporter, provider: MeterProvider):
@@ -146,7 +146,6 @@ def _connect(app_id: str, exporter: OtelExporter, provider: MeterProvider):
             .connect()
         )
     except Exception as exc:
-        exporter.close()
         provider.shutdown()
         pytest.skip(f"Aerospike seed {host}:{port} unavailable: {exc}")
 
@@ -174,11 +173,11 @@ def test_passed_meter_provider_survives_enable_and_disable(monkeypatch):
         cluster.disable_metrics()
         assert cluster.metrics_enabled() is False
         assert started[0].is_alive() is False
-        held = _metric_value(reader, "aerospike_client_command_count")
+        held = _metric_value(reader, "aerospike.client.cluster.command_count")
         assert held == first
         _write(cluster, dataset)
         time.sleep(EXPORT_INTERVAL_SECONDS * 2.5)
-        assert _metric_value(reader, "aerospike_client_command_count") == held
+        assert _metric_value(reader, "aerospike.client.cluster.command_count") == held
         assert provider._shutdown is False
 
         cluster.enable_metrics(metrics_policy())
@@ -186,13 +185,12 @@ def test_passed_meter_provider_survives_enable_and_disable(monkeypatch):
         _write(cluster, dataset)
         second = _wait_for_value(reader, lambda value: value > held)
         cluster.disable_metrics()
-        assert _metric_value(reader, "aerospike_client_command_count") == second
+        assert _metric_value(reader, "aerospike.client.cluster.command_count") == second
         cluster.close()
         cluster = None
 
-        exporter.close()
         assert provider._shutdown is False
-        assert _metric_value(reader, "aerospike_client_command_count") == second
+        assert _metric_value(reader, "aerospike.client.cluster.command_count") == second
     finally:
         if cluster is not None:
             cluster.close()
@@ -214,13 +212,12 @@ def test_webapp_metrics_and_client_metrics_share_the_provider(monkeypatch):
         collected = _wait_for_client_count(reader, lambda value: value >= 1)
         assert collected["orders_placed"] == ("orders", 2)
         assert collected["orders_backlog"] == ("orders", 4)
-        scope, value = collected["aerospike_client_command_count"]
+        scope, value = collected["aerospike.client.cluster.command_count"]
         assert scope == "aerospike.client"
         assert value >= 1
     finally:
         cluster.disable_metrics()
         cluster.close()
-        exporter.close()
         provider.shutdown()
 
 
@@ -237,7 +234,7 @@ def test_webapp_metrics_continue_while_client_metrics_are_disabled(monkeypatch):
         cluster.enable_metrics(metrics_policy())
         _write(cluster, dataset)
         collected = _wait_for_client_count(reader, lambda value: value >= 1)
-        client = collected["aerospike_client_command_count"][1]
+        client = collected["aerospike.client.cluster.command_count"][1]
         assert collected["orders_placed"] == ("orders", 2)
         assert collected["orders_backlog"] == ("orders", 4)
 
@@ -248,7 +245,7 @@ def test_webapp_metrics_continue_while_client_metrics_are_disabled(monkeypatch):
         _write(cluster, dataset)
         time.sleep(EXPORT_INTERVAL_SECONDS * 2.5)
         held = _collected(reader)
-        assert held["aerospike_client_command_count"] == ("aerospike.client", client)
+        assert held["aerospike.client.cluster.command_count"] == ("aerospike.client", client)
         assert held["orders_placed"] == ("orders", 5)
         assert held["orders_backlog"] == ("orders", 9)
 
@@ -258,11 +255,10 @@ def test_webapp_metrics_continue_while_client_metrics_are_disabled(monkeypatch):
         resumed = _wait_for_client_count(reader, lambda value: value > client)
         assert resumed["orders_placed"] == ("orders", 6)
         assert resumed["orders_backlog"] == ("orders", 9)
-        assert resumed["aerospike_client_command_count"][0] == "aerospike.client"
+        assert resumed["aerospike.client.cluster.command_count"][0] == "aerospike.client"
     finally:
         cluster.disable_metrics()
         cluster.close()
-        exporter.close()
         assert provider._shutdown is False
         provider.shutdown()
 
@@ -297,9 +293,9 @@ def test_operational_and_usage_flags_gate_the_callback(monkeypatch):
             and document.get("usage_metrics_enabled") is False,
         )
         collected = _collected(reader)
-        assert "aerospike_client_total_nodes" in collected
-        assert "aerospike_client_command_count" not in collected
-        assert "aerospike_client_feature_usage" not in collected
+        assert "aerospike.client.cluster.total_nodes" in collected
+        assert "aerospike.client.cluster.command_count" not in collected
+        assert "aerospike.client.feature.api_blocking" not in collected
 
         cluster.enable_metrics(MetricsPolicy(operational_enabled=True))
         _write(cluster, dataset)
@@ -311,9 +307,9 @@ def test_operational_and_usage_flags_gate_the_callback(monkeypatch):
             and document.get("command_count", 0) >= 1,
         )
         collected = _collected(reader)
-        assert collected["aerospike_client_command_count"][0] == "aerospike.client"
-        assert "aerospike_client_feature_usage" not in collected
-        assert "aerospike_client_total_nodes" in collected
+        assert collected["aerospike.client.cluster.command_count"][0] == "aerospike.client"
+        assert "aerospike.client.feature.api_blocking" not in collected
+        assert "aerospike.client.cluster.total_nodes" in collected
 
         cluster.enable_metrics(MetricsPolicy(operational_enabled=True, usage_enabled=True))
         _write(cluster, dataset)
@@ -325,8 +321,8 @@ def test_operational_and_usage_flags_gate_the_callback(monkeypatch):
             and document.get("usage", {}).get("blocking", 0) >= 1,
         )
         collected = _collected(reader)
-        assert "aerospike_client_command_count" in collected
-        assert collected["aerospike_client_feature_usage"][0] == "aerospike.client"
+        assert "aerospike.client.cluster.command_count" in collected
+        assert collected["aerospike.client.feature.api_blocking"][0] == "aerospike.client"
 
         cluster.enable_metrics(MetricsPolicy(usage_enabled=True))
         _wait_for_snapshot(
@@ -336,9 +332,9 @@ def test_operational_and_usage_flags_gate_the_callback(monkeypatch):
             and document.get("timestamp") != both["timestamp"],
         )
         collected = _collected(reader)
-        assert "aerospike_client_command_count" not in collected
-        assert "aerospike_client_feature_usage" in collected
-        assert "aerospike_client_total_nodes" in collected
+        assert "aerospike.client.cluster.command_count" not in collected
+        assert "aerospike.client.feature.api_blocking" in collected
+        assert "aerospike.client.cluster.total_nodes" in collected
 
         cluster.enable_metrics(MetricsPolicy())
         _wait_for_snapshot(
@@ -349,11 +345,10 @@ def test_operational_and_usage_flags_gate_the_callback(monkeypatch):
         )
         collected = _collected(reader)
         assert cluster.metrics_enabled() is True
-        assert "aerospike_client_command_count" not in collected
-        assert "aerospike_client_feature_usage" not in collected
-        assert "aerospike_client_total_nodes" in collected
+        assert "aerospike.client.cluster.command_count" not in collected
+        assert "aerospike.client.feature.api_blocking" not in collected
+        assert "aerospike.client.cluster.total_nodes" in collected
     finally:
         cluster.disable_metrics()
         cluster.close()
-        exporter.close()
         provider.shutdown()
