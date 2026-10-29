@@ -110,13 +110,18 @@ def _connect(seed: str, app_id: str, exporter: OtelExporter, provider, *, altern
         pytest.skip(f"Aerospike seed {seed} unavailable: {exc}")
 
 
-def _published(reader) -> tuple[set[str], set[str]]:
-    """Client metric names present on this collect, and the node labels among them."""
+def _published(reader) -> tuple[set[str], set[str], set[str]]:
+    """Client metric names, node ids, and ``address:port`` hosts on this collect.
+
+    A departed node often has no ``node_name``. Its series still carry
+    ``server_node_address`` and ``server_node_port``.
+    """
     data = reader.get_metrics_data()
     names: set[str] = set()
     nodes: set[str] = set()
+    hosts: set[str] = set()
     if data is None:
-        return names, nodes
+        return names, nodes, hosts
     for resource in data.resource_metrics:
         for scope in resource.scope_metrics:
             if scope.scope.name != "aerospike.client":
@@ -127,10 +132,15 @@ def _published(reader) -> tuple[set[str], set[str]]:
                     continue
                 names.add(metric.name)
                 for point in points:
-                    node = dict(point.attributes).get("server_node_id")
+                    attributes = dict(point.attributes)
+                    node = attributes.get("server_node_id")
                     if node:
                         nodes.add(str(node))
-    return names, nodes
+                    address = attributes.get("server_node_address")
+                    port = attributes.get("server_node_port")
+                    if address and port is not None:
+                        hosts.add(f"{address}:{port}")
+    return names, nodes, hosts
 
 
 def _enable(cluster, exporter: OtelExporter, dataset) -> dict:
@@ -182,7 +192,7 @@ def test_metrics_keep_flowing_when_the_only_server_stops(monkeypatch):
             assert row["nodes_departed"] == []
             assert row["command_count"] == before
 
-        names, node_labels = _published(reader)
+        names, node_labels, _hosts = _published(reader)
         assert "aerospike.client.cluster.total_nodes" in names
         assert "aerospike.client.cluster.invalid_node_count" in names
         assert "aerospike.client.cluster.open_connections" in names
@@ -376,16 +386,18 @@ def test_one_node_of_a_two_node_cluster_drops_out_of_the_callback(monkeypatch):
         survivor_host = f"{down['nodes'][0]['node_address']}:{down['nodes'][0]['node_port']}"
         assert survivor_host == survivor[2]
 
-        names, node_labels = _published(reader)
+        names, node_labels, hosts = _published(reader)
         assert "aerospike.client.cluster.total_nodes" in names
         assert "aerospike.client.cluster.invalid_node_count" in names
         assert "aerospike.client.cluster.command_count" in names
         assert "aerospike.client.node.connections_in_pool" in names
         assert _collected(reader)["aerospike.client.cluster.total_nodes"][1] == 1
-        live_ids = {node.get("node_name") for node in down["nodes"]}
-        departed_ids = {node.get("node_name") for node in down["nodes_departed"]}
-        assert live_ids.isdisjoint(departed_ids)
-        assert node_labels == live_ids | departed_ids
+        live_names = {node.get("node_name") for node in down["nodes"] if node.get("node_name")}
+        assert live_names <= node_labels
+        # A departed node has address and port. Its node_name is often blank,
+        # so the series omits server_node_id rather than publishing an empty one.
+        assert survivor_host in hosts
+        assert stopped_host in hosts
     finally:
         if cluster is not None:
             try:
