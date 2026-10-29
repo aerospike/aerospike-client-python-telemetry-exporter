@@ -380,7 +380,7 @@ def _latency_bucket_count(series: list[dict], group: str, namespace_name: str, l
         float(sample["value"][1])
         for sample in series
         if sample["metric"].get("__name__") == "aerospike_client_namespace_latency_bucket"
-        and sample["metric"].get("operation") == group
+        and sample["metric"].get("latency_type") == group
         and sample["metric"].get("ns") == namespace_name
         and sample["metric"].get("le") == le
     )
@@ -566,7 +566,7 @@ def test_webapp_pushes_a_client_metric_to_the_collector(otel_collector, grpc):
             sample
             for sample in series
             if sample["metric"].get("__name__") == "aerospike_client_namespace_latency_bucket"
-            and sample["metric"].get("operation") == "read"
+            and sample["metric"].get("latency_type") == "read"
             and sample["metric"].get("ns") == namespace_name
             and sample["metric"].get("le") == "+Inf"
         )

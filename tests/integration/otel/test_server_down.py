@@ -382,7 +382,10 @@ def test_one_node_of_a_two_node_cluster_drops_out_of_the_callback(monkeypatch):
         assert "aerospike.client.cluster.command_count" in names
         assert "aerospike.client.node.connections_in_pool" in names
         assert _collected(reader)["aerospike.client.cluster.total_nodes"][1] == 1
-        assert len(node_labels) == 1
+        live_ids = {node.get("node_name") for node in down["nodes"]}
+        departed_ids = {node.get("node_name") for node in down["nodes_departed"]}
+        assert live_ids.isdisjoint(departed_ids)
+        assert node_labels == live_ids | departed_ids
     finally:
         if cluster is not None:
             try:

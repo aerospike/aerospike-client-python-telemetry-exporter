@@ -29,6 +29,8 @@ def _document():
         "client_version": "1.0.0",
         "cluster_name": "local",
         "app_id": "orders-service",
+        "operational_metrics_enabled": True,
+        "usage_metrics_enabled": True,
         "labels": {"environment": "prod", "cluster_name": "spoofed", "region": "us-west"},
         "command_count": 4,
         "total_nodes": 1,
@@ -94,14 +96,14 @@ def test_latency_buckets_are_cumulative_observable_counters():
     descriptor = CATALOG.by_source("namespace.latency")
     assert descriptor.name == "aerospike.client.namespace.latency_bucket"
     assert "le" in descriptor.labels
-    assert "operation" in descriptor.labels
+    assert "latency_type" in descriptor.labels
     assert "latency_unit" in descriptor.labels
     labels = {
         "server_node_id": "BB9",
         "server_node_address": "127.0.0.1",
         "server_node_port": "3000",
         "ns": "test",
-        "operation": "read",
+        "latency_type": "read",
         "latency_unit": "milliseconds",
     }
     assert list(iter_metric_points(document, descriptor)) == [
@@ -141,8 +143,8 @@ def test_cluster_and_node_latency_use_their_revised_scopes():
     assert node.name == "aerospike.client.node.conn_latency_bucket"
 
     assert list(iter_metric_points(document, cluster)) == [
-        (2, {"operation": "read", "le": "1"}),
-        (5, {"operation": "read", "le": "+Inf"}),
+        (2, {"latency_type": "read", "le": "1"}),
+        (5, {"latency_type": "read", "le": "+Inf"}),
     ]
     assert list(iter_metric_points(document, node)) == [
         (
@@ -151,6 +153,7 @@ def test_cluster_and_node_latency_use_their_revised_scopes():
                 "server_node_id": "BB9",
                 "server_node_address": "127.0.0.1",
                 "server_node_port": "3000",
+                "latency_type": "conn",
                 "le": "1",
             },
         ),
@@ -160,6 +163,7 @@ def test_cluster_and_node_latency_use_their_revised_scopes():
                 "server_node_id": "BB9",
                 "server_node_address": "127.0.0.1",
                 "server_node_port": "3000",
+                "latency_type": "conn",
                 "le": "+Inf",
             },
         ),
@@ -192,7 +196,7 @@ def test_reserved_and_non_mapping_labels_are_dropped():
         "app_id": "spoofed-app",
         "feature": "spoofed-feature",
         "le": "spoofed-bound",
-        "operation": "spoofed-operation",
+        "latency_type": "spoofed-type",
         "latency_unit": "spoofed-unit",
         "client_type": "spoofed-type",
         "client_version": "spoofed-version",
@@ -213,7 +217,7 @@ def test_reserved_and_non_mapping_labels_are_dropped():
         "ns",
         "feature",
         "le",
-        "operation",
+        "latency_type",
         "latency_unit",
         "node_address",
         "node_port",
@@ -265,23 +269,64 @@ def test_missing_names_omit_the_label_and_duplicate_names_both_yield():
     assert opened[0][1]["server_node_address"] != opened[1][1]["server_node_address"]
 
 
-def test_departed_nodes_rollups_and_non_numbers_are_omitted():
+def test_departed_nodes_publish_their_final_counters_once():
     document = _document()
-    document["nodes"] = []
+    document["nodes"][0]["namespaces"][0]["latencies"] = [
+        {"type": "read", "bucket_counts": [1, 0]}
+    ]
     document["nodes_departed"] = [
+        {
+            "node_name": "BB9",
+            "node_address": "10.9.9.9",
+            "node_port": 3000,
+            "connections": {"opened": 99},
+            "namespaces": [{"namespace": "test", "errors": 99}],
+        },
         {
             "node_name": "gone",
             "node_address": "10.0.0.9",
             "node_port": 3000,
             "connections": {"opened": 8},
-        }
+            "conn_latency": {"type": "conn", "bucket_counts": [2, 1]},
+            "namespaces": [
+                {
+                    "namespace": "test",
+                    "errors": 3,
+                    "latencies": [{"type": "read", "bucket_counts": [4, 0]}],
+                }
+            ],
+        },
     ]
+
+    opened = list(iter_metric_points(document, CATALOG.by_source("node.connections.opened")))
+    assert [value for value, _ in opened] == [2, 8]
+    assert opened[0][1]["server_node_id"] == "BB9"
+    assert opened[0][1]["server_node_address"] == "127.0.0.1"
+    assert opened[1][1]["server_node_id"] == "gone"
+
+    errors = list(iter_metric_points(document, CATALOG.by_source("namespace.errors")))
+    assert [(value, point["server_node_id"]) for value, point in errors] == [
+        (7, "BB9"),
+        (3, "gone"),
+    ]
+
+    namespace_latency = list(
+        iter_metric_points(document, CATALOG.by_source("namespace.latency"))
+    )
+    assert {point["server_node_id"] for _, point in namespace_latency} == {"BB9", "gone"}
+    assert {point["latency_type"] for _, point in namespace_latency} == {"read"}
+
+    conn_latency = list(iter_metric_points(document, CATALOG.by_source("node.latency.conn")))
+    assert {point["server_node_id"] for _, point in conn_latency} == {"gone"}
+    assert {point["latency_type"] for _, point in conn_latency} == {"conn"}
+
+
+def test_non_numbers_are_omitted():
+    document = _document()
     document["command_count"] = "4"
     document["total_nodes"] = True
     document.pop("command_retries", None)
 
-    opened = CATALOG.by_source("node.connections.opened")
-    assert list(iter_metric_points(document, opened)) == []
     assert list(iter_metric_points(document, CATALOG.by_source("command_count"))) == []
     assert list(iter_metric_points(document, CATALOG.by_source("total_nodes"))) == []
     assert list(iter_metric_points(document, CATALOG.by_source("command_retries"))) == []
@@ -295,6 +340,29 @@ def test_unmapped_snapshot_fields_have_no_descriptor():
     ):
         with pytest.raises(KeyError):
             CATALOG.by_source(source)
+
+
+def test_missing_tier_flags_omit_operational_and_usage_series():
+    document = _document()
+    document.pop("operational_metrics_enabled")
+    document.pop("usage_metrics_enabled")
+    document["usage"] = {"blocking": 4}
+    document["command_retries"] = 3
+
+    assert list(iter_metric_points(document, CATALOG.by_source("command_count"))) == []
+    assert list(iter_metric_points(document, CATALOG.by_source("namespace.errors"))) == []
+    assert list(iter_metric_points(document, CATALOG.by_source("usage.blocking"))) == []
+    assert list(iter_metric_points(document, CATALOG.by_source("total_nodes"))) == [(1, {})]
+    assert list(iter_metric_points(document, CATALOG.by_source("node.connections.opened"))) == [
+        (
+            2,
+            {
+                "server_node_id": "BB9",
+                "server_node_address": "127.0.0.1",
+                "server_node_port": "3000",
+            },
+        )
+    ]
 
 
 def test_disabled_tiers_omit_their_series_and_keep_the_always_on_gauges():

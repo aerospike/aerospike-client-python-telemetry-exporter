@@ -62,7 +62,7 @@ RESERVED_LABELS = frozenset(
         "server_node_port",
         "ns",
         "le",
-        "operation",
+        "latency_type",
         "latency_unit",
         "feature",
         "conn_type",
@@ -306,21 +306,21 @@ def _metrics() -> dict[str, MetricDescriptor]:
         "aerospike.client.node.conn_latency_bucket",
         "Cumulative node connection-acquisition latency observations by upper bound",
         "{operation}",
-        _NODE_LABELS + ("le", "latency_unit"),
+        _NODE_LABELS + ("latency_type", "le", "latency_unit"),
     )
     metrics["cluster.latency"] = _counter(
         "cluster.latency",
         "aerospike.client.cluster.latency_bucket",
-        "Cumulative whole-call latency observations by operation and upper bound",
+        "Cumulative whole-call latency observations by latency type and upper bound",
         "{operation}",
-        ("operation", "le", "latency_unit"),
+        ("latency_type", "le", "latency_unit"),
     )
     metrics["namespace.latency"] = _counter(
         "namespace.latency",
         "aerospike.client.namespace.latency_bucket",
-        "Cumulative namespace RPC latency observations by operation and upper bound",
+        "Cumulative namespace RPC latency observations by latency type and upper bound",
         "{operation}",
-        _NAMESPACE_LABELS + ("operation", "le", "latency_unit"),
+        _NAMESPACE_LABELS + ("latency_type", "le", "latency_unit"),
     )
     return metrics
 
@@ -384,13 +384,15 @@ _OPERATIONAL_SOURCES = frozenset(
 def _tier_is_off(document: Mapping[str, Any], source: str) -> bool:
     """Whether this snapshot says not to publish ``source``.
 
-    A missing flag does not hide the series. ``False`` does. Always-on gauges
-    are published whenever the document is present.
+    Operational series are published only when ``operational_metrics_enabled``
+    is true. Usage series are published only when ``usage_metrics_enabled``
+    is true. A missing flag omits that tier. Always-on gauges are published
+    whenever the document is present.
     """
     if source.startswith("usage."):
-        return document.get("usage_metrics_enabled") is False
+        return document.get("usage_metrics_enabled") is not True
     if source in _OPERATIONAL_SOURCES:
-        return document.get("operational_metrics_enabled") is False
+        return document.get("operational_metrics_enabled") is not True
     return False
 
 
@@ -446,10 +448,14 @@ def rename_label(name: str, label_map: Optional[Mapping[str, str]] = None) -> st
 
 
 def client_app_ip() -> str:
-    """IPv4 address of the process exporting metrics.
+    """Local address of the default route, when the app does not set one.
 
-    A UDP socket chooses the outbound interface and does not send a packet.
-    The webapp can set the ``client_app_ip`` label itself; that value is kept.
+    A UDP socket connected to ``192.0.2.1`` sends no packet. ``getsockname``
+    then returns the address the kernel would use for the default route.
+    That address is often not the service, pod, or node address the app
+    wants published. The app sets the ``client_app_ip`` label to choose the
+    published address. This lookup is only the fallback. If it fails, the
+    label is omitted.
     """
     global _client_app_ip
     if _client_app_ip:
@@ -459,10 +465,7 @@ def client_app_ip() -> str:
             sock.connect(("192.0.2.1", 1))
             _client_app_ip = sock.getsockname()[0]
     except OSError:
-        try:
-            _client_app_ip = socket.gethostbyname(socket.gethostname())
-        except OSError:
-            _client_app_ip = ""
+        _client_app_ip = ""
     return _client_app_ip
 
 
@@ -474,9 +477,11 @@ def series_attributes(
     """Labels for one series.
 
     Identity is renamed through the global map. A webapp label that lands on
-    a reserved name is dropped. ``client_app_ip`` is the webapp address and is on
-    every series. ``extra`` holds dimensions for this point, such as ``server_node_id``
-    or ``ns``, and those are renamed by the same map.
+    a reserved name is dropped. ``client_app_ip`` is on every series. The
+    webapp label wins. When the webapp does not set it, the fallback is the
+    default-route address from :func:`client_app_ip`. ``extra`` holds
+    dimensions for this point, such as ``server_node_id`` or ``ns``, and
+    those are renamed by the same map.
     """
     attributes: dict[str, str] = {}
     for source in _IDENTITY:
@@ -513,9 +518,13 @@ def iter_metric_points(
     histogram is emitted as cumulative observable counters with an ``le``
     label. Bucket boundaries are in the snapshot's latency unit.
 
-    ``operational_metrics_enabled`` false omits the operational tier, and
-    ``usage_metrics_enabled`` false omits feature usage. Always-on gauges are
-    still yielded.
+    Operational series are yielded only when ``operational_metrics_enabled``
+    is true, and feature usage only when ``usage_metrics_enabled`` is true.
+    A missing flag omits that tier. Always-on gauges are still yielded.
+
+    Node and namespace series include ``nodes`` and any ``nodes_departed``
+    entry whose ``node_name`` is not still in ``nodes``. A name in both lists
+    is published from ``nodes`` only.
     """
     source = descriptor.source
     if _tier_is_off(document, source):
@@ -525,16 +534,16 @@ def iter_metric_points(
             yield from _bucket_points(
                 document,
                 _latency_buckets(document.get("cluster_latencies"), group),
-                {"operation": group},
+                {"latency_type": group},
             )
         return
     if source == "namespace.latency":
         for group in ("read", "write", "batch", "query"):
-            for node in _mappings(document.get("nodes")):
+            for node in _nodes_to_export(document):
                 node_labels = _node_labels(node)
                 for namespace in _mappings(node.get("namespaces")):
                     point = dict(node_labels)
-                    point["operation"] = group
+                    point["latency_type"] = group
                     if namespace.get("namespace"):
                         point["ns"] = str(namespace["namespace"])
                     yield from _bucket_points(
@@ -552,18 +561,20 @@ def iter_metric_points(
                 yield number, {}
         return
     if source == "node.latency.conn":
-        for node in _mappings(document.get("nodes")):
+        for node in _nodes_to_export(document):
             histogram = node.get("conn_latency")
             buckets = (
                 histogram.get("bucket_counts")
                 if isinstance(histogram, Mapping) and histogram.get("type") == "conn"
                 else None
             )
-            yield from _bucket_points(document, buckets, _node_labels(node))
+            point = _node_labels(node)
+            point["latency_type"] = "conn"
+            yield from _bucket_points(document, buckets, point)
         return
     if source.startswith("namespace."):
         field = source.split(".", 1)[1]
-        for node in _mappings(document.get("nodes")):
+        for node in _nodes_to_export(document):
             extra = _node_labels(node)
             for namespace in _mappings(node.get("namespaces")):
                 number = _number(namespace.get(field)) if field in namespace else None
@@ -576,7 +587,7 @@ def iter_metric_points(
         return
     if source.startswith("node."):
         field_path = source.split(".", 1)[1]
-        for node in _mappings(document.get("nodes")):
+        for node in _nodes_to_export(document):
             number = _number(_dig(node, field_path))
             if number is None:
                 continue
@@ -585,6 +596,23 @@ def iter_metric_points(
     number = _number(_dig(document, source))
     if number is not None:
         yield number, {}
+
+
+def _nodes_to_export(document: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """Live nodes, then departed nodes that are not still listed in ``nodes``.
+
+    A node that leaves and is still absent at the next snapshot is in
+    ``nodes_departed`` with its final counters. The same ``node_name`` in
+    both lists is published from ``nodes`` only.
+    """
+    active = list(_mappings(document.get("nodes")))
+    seen = {node.get("node_name") for node in active}
+    departed = [
+        node
+        for node in _mappings(document.get("nodes_departed"))
+        if node.get("node_name") not in seen
+    ]
+    return active + departed
 
 
 def _mappings(value: Any) -> Iterator[Mapping[str, Any]]:

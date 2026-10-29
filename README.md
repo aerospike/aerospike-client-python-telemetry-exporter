@@ -60,14 +60,15 @@ document next to `command_count`.
 `nodes[].namespaces[].client_timeouts`. It is not repeated on the document.
 
 Tier 0 is published whenever metrics are enabled. Operational series are
-omitted when `operational_metrics_enabled` is false. Usage series are omitted
-when `usage_metrics_enabled` is false. A missing flag does not hide a series.
+published only when `operational_metrics_enabled` is true. Usage series are
+published only when `usage_metrics_enabled` is true. A missing flag omits
+that tier.
 
-Every metric is `aerospike.client.<context>.<stat>`. Cluster-wide series use
-`cluster`, for example `aerospike.client.cluster.command_count`. Node series
-use `node`, for example `aerospike.client.node.connections_in_use`. Namespace
-series use `namespace`. Feature counters use `feature`. A Prometheus exporter
-replaces each dot with an underscore, so the same series is
+Every metric is `aerospike.client.<context>.<stat>`. The context stays in the
+name: `cluster`, `node`, `namespace`, or `feature`. For example,
+`aerospike.client.cluster.command_count` and
+`aerospike.client.node.connections_in_use`. A Prometheus exporter replaces
+each dot with an underscore, so the same series is
 `aerospike_client_<context>_<stat>` there.
 
 | Metric | Kind | Tier | Where it comes from |
@@ -82,9 +83,9 @@ replaces each dot with an underscore, so the same series is
 | `aerospike.client.cluster.batch_partial_failure` | counter | Operational | Batch commands that finished with a partial failure. Stays 0 until native reports it. |
 | `aerospike.client.cluster.cpu_percent` | gauge | Operational | Process CPU. |
 | `aerospike.client.cluster.memory_bytes` | gauge | Operational | Process memory. |
-| `aerospike.client.cluster.latency_bucket` | counter | Operational | Cluster whole-call latency. Label `operation` is `read`, `write`, `batch`, or `query`. |
-| `aerospike.client.namespace.latency_bucket` | counter | Operational | Namespace RPC latency. Same `operation` label, plus the node labels and `ns`. |
-| `aerospike.client.node.conn_latency_bucket` | counter | Operational | Connection-acquisition latency on a node. |
+| `aerospike.client.cluster.latency_bucket` | counter | Operational | Cluster whole-call latency. Label `latency_type` is `read`, `write`, `batch`, or `query`. |
+| `aerospike.client.namespace.latency_bucket` | counter | Operational | Namespace RPC latency. Same `latency_type` label, plus the node labels and `ns`. |
+| `aerospike.client.node.conn_latency_bucket` | counter | Operational | Connection-acquisition latency on a node. Label `latency_type` is `conn`. |
 | `aerospike.client.namespace.client_timeouts` | counter | Operational | Client-side timeouts on that namespace. Stays 0 until native reports it. |
 | `aerospike.client.feature.api_blocking` | counter | Usage | One counter per feature. The other usage names follow the same pattern: `aerospike.client.feature.api_deferred`, `aerospike.client.feature.api_background`, `aerospike.client.feature.shape_point`, `aerospike.client.feature.shape_batch`, `aerospike.client.feature.shape_query`, `aerospike.client.feature.object_mapping_read`, `aerospike.client.feature.object_mapping_write`, `aerospike.client.feature.filter_ael`, `aerospike.client.feature.filter_exp`. |
 
@@ -95,9 +96,48 @@ open, TLS, or auth failure stays on the node
 That is a different series from the cluster validation counters above.
 
 Labels on every series include `cluster`, `client_type`, `client_version`,
-`app_id`, and `client_app_ip`. Node series add `server_node_id`,
-`server_node_address`, and `server_node_port`. Namespace series also add `ns`.
-A webapp label that uses one of those names is dropped. Exporter values win.
+`app_id`, and `client_app_ip`. They stay metric labels. Whether a
+client-object identifier should separate two clients that share those four
+values is an open question for the client team. Node series add
+`server_node_id`, `server_node_address`, and `server_node_port`. Namespace
+series also add `ns`. Those names stay, because the shorter spec names are
+generic enough to collide with application labels. A webapp label that uses
+one of the exported names is dropped. Exporter values win. Revisit the node
+and namespace names if the client or product team wants the spec names.
+
+The webapp sets `client_app_ip` to the address it wants published. When that
+label is absent, the fallback is the local address of the default route: a
+UDP socket connects to `192.0.2.1` and `getsockname()` returns the address
+the kernel would use. That connect sends no packet. The result can be a
+different address from the service, pod, or node address. If the lookup
+fails, the label is omitted.
+
+A node that has left and is still absent is listed in `nodes_departed`.
+Its final counters are published with the live nodes. The same node name in
+both lists is published from `nodes` only. A node that leaves and rejoins
+before the snapshot is built is only in `nodes`.
+
+`export()` stores that one document and returns. The webapp's reader collects
+it later. A slower reader publishes only the newest document. A cumulative
+counter that is still on the new document keeps its latest absolute total.
+A series that existed only on a skipped document is not published. That is
+any stat, not only `nodes_departed`: a departed node, a gauge that moved and
+came back, or any other label set that disappeared before the reader ran.
+The client can also drain `nodes_departed` when `export()` returns, which is
+before that collect.
+
+Plan, not implemented: keep each document until a reader callback has
+observed it. Emit a series that is only on an older uncollected document
+once, from that document. Emit a series that is on the newest document from
+the newest absolute value, so counters are not added twice. Agree with the
+client team when `nodes_departed` is drained before building this.
+
+Instrument units stay the OpenTelemetry strings already registered, such as
+`{connection}`, `{command}`, `{operation}`, `%`, and `By`. The spec table
+spells some of those as `connection`, `command`, `count`, and `bytes`. The
+unit is part of the instrument identity, so changing it publishes a new
+series. Plan, not implemented: agree the spelling with the client team
+before changing a unit.
 
 The metrics log file is the client SDK `MetricsWriter`. A later SDK field,
 `report_format`, defaults to `log`, the positional file written today.
