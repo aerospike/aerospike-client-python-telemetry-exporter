@@ -1,9 +1,9 @@
 # Pull-request tests. Adapted from the client SDK's build-test workflow.
 #
-# The client SDK is pinned to a commit on CLIENT-OM-372. That commit dropped
-# conn_type from the snapshot. _SnapshotPolicy is on that commit and is not
-# in the published 1.0.0 release. This workflow does not build or publish a
-# wheel.
+# The client SDK is pinned to a commit on CLIENT-OM-372. That commit depends
+# on aerospike-native==1.0.1.dev124. _SnapshotPolicy is on that commit and is
+# not in the published 1.0.0 release. This workflow does not build or publish
+# a wheel.
 
 name: CI Build & Test
 
@@ -22,9 +22,10 @@ permissions:
   id-token: write
 
 env:
-  # CLIENT-OM-372 at 17fa7f1. Async exporters always run on the metrics-owned
-  # loop. async_exporter_isolation is gone. _SnapshotPolicy is still present.
-  SDK_REF: 17fa7f145658278f72e89b1f66885b27bbc767ae
+  # CLIENT-OM-372 at 68a8db6. Periodic export runs on aerospike-metrics-export.
+  # Async exporter coroutines still run on the metrics-owned loop.
+  # _SnapshotPolicy is still present. The native pin is 1.0.1.dev124.
+  SDK_REF: 68a8db6d39544bb77f9c372fec8b3f3c4ddc2f4f
 
 jobs:
   lint:
