@@ -125,6 +125,8 @@ jobs:
           python -m pip install -e ".[dev,otel]" ./client-sdk --only-binary aerospike-native \
             --extra-index-url "https://${user_enc}:${JF_OIDC_TOKEN}@artifact.aerospike.io/artifactory/api/pypi/${{ vars.JFROG_PROJECT || 'database' }}-pypi-dev-local/simple/"
           python -c "import inspect, aerospike_sdk.metrics.snapshot as snapshot; assert '_SnapshotPolicy' in inspect.getsource(snapshot), 'installed aerospike-sdk is not the pinned CLIENT-OM-372 commit'"
+          # Webapp library used by the Prometheus reader tests. Not an exporter dependency.
+          python -m pip install opentelemetry-exporter-prometheus
 
       - name: Run unit tests
         run: |
@@ -189,6 +191,8 @@ jobs:
           python -m pip install -e ".[dev,otel]" ./client-sdk --only-binary aerospike-native \
             --extra-index-url "https://${user_enc}:${JF_OIDC_TOKEN}@artifact.aerospike.io/artifactory/api/pypi/${{ vars.JFROG_PROJECT || 'database' }}-pypi-dev-local/simple/"
           python -c "import inspect, aerospike_sdk.metrics.snapshot as snapshot; assert '_SnapshotPolicy' in inspect.getsource(snapshot), 'installed aerospike-sdk is not the pinned CLIENT-OM-372 commit'"
+          # Webapp library used by the Prometheus reader tests. Not an exporter dependency.
+          python -m pip install opentelemetry-exporter-prometheus
 
       # AEROSPIKE_HOST stays unset. The suite starts Enterprise 8.2.0.0, the
       # second cluster, the collector, and Prometheus on its own.
