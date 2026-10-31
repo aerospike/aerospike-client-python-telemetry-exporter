@@ -1,0 +1,27 @@
+# Receives OTLP metrics from the exporter.
+# 4317 is OTLP/gRPC. 4318 is OTLP/HTTP. 8889 is the Prometheus scrape endpoint.
+# Docker publishes those ports on the host. Prometheus scrapes 8889 on the
+# collector's Docker network name.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+exporters:
+  file:
+    path: /var/otel/metrics.json
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    add_metric_suffixes: false
+    resource_to_telemetry_conversion:
+      enabled: true
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      exporters: [file, prometheus]
