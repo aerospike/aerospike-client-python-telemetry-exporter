@@ -15,6 +15,10 @@
 The webapp owns ``opentelemetry-exporter-prometheus`` and starts the scrape
 server. ``OtelExporter`` only registers observable instruments. One test uses
 that reader alone. The other puts it beside a periodic OpenTelemetry reader.
+
+The webapp's own instruments share that provider. A periodic reader and a
+Prometheus reader each collect both families. A second periodic reader
+registered later collects the same families.
 """
 
 from __future__ import annotations
@@ -169,5 +173,113 @@ def test_prometheus_and_otel_readers_share_one_meter_provider():
         exporter.export(_document(2))
         assert _prometheus_value(_scrape(port), _PROMETHEUS_NODES) == 2.0
         _wait_for_nodes(capture, 2.0)
+    finally:
+        provider.shutdown()
+
+
+_ORDERS_PLACED = "orders_placed"
+_ORDERS_BACKLOG = "orders_backlog"
+_PROMETHEUS_PLACED = "orders_placed_total"
+_PROMETHEUS_BACKLOG = "orders_backlog"
+
+
+class _SeriesCapture(MetricExporter):
+    """Latest value of each ``(scope, name)`` a periodic reader exports."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._values: dict[tuple[str, str], float] = {}
+        self._lock = threading.Lock()
+
+    def export(self, metrics_data, timeout_millis=10_000, **kwargs):
+        found: dict[tuple[str, str], float] = {}
+        for resource in metrics_data.resource_metrics:
+            for scope in resource.scope_metrics:
+                scope_name = scope.scope.name
+                for metric in scope.metrics:
+                    points = list(metric.data.data_points)
+                    if points:
+                        found[(scope_name, metric.name)] = float(points[0].value)
+        with self._lock:
+            self._values.update(found)
+        return MetricExportResult.SUCCESS
+
+    def shutdown(self, timeout_millis=30_000, **kwargs):
+        return None
+
+    def force_flush(self, timeout_millis=10_000):
+        return True
+
+    def value(self, scope: str, name: str) -> float | None:
+        with self._lock:
+            return self._values.get((scope, name))
+
+
+def _webapp_instruments(provider: MeterProvider):
+    orders = provider.get_meter("orders")
+    return orders.create_counter(_ORDERS_PLACED), orders.create_gauge(_ORDERS_BACKLOG)
+
+
+def _wait_for_series(capture: _SeriesCapture, scope: str, name: str, expected: float) -> None:
+    deadline = time.monotonic() + _WAIT_SECONDS
+    last = None
+    while time.monotonic() < deadline:
+        last = capture.value(scope, name)
+        if last == expected:
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"{scope}/{name} is {last}, expected {expected}")
+
+
+def _assert_shared_series(capture: _SeriesCapture) -> None:
+    _wait_for_series(capture, "orders", _ORDERS_PLACED, 2.0)
+    _wait_for_series(capture, "orders", _ORDERS_BACKLOG, 4.0)
+    _wait_for_series(capture, "aerospike.client", _NODES, 2.0)
+
+
+def _assert_prometheus_mix(port: int) -> None:
+    text = _scrape(port)
+    assert _prometheus_value(text, _PROMETHEUS_PLACED) == 2.0
+    assert _prometheus_value(text, _PROMETHEUS_BACKLOG) == 4.0
+    assert _prometheus_value(text, _PROMETHEUS_NODES) == 2.0
+
+
+def test_periodic_and_prometheus_readers_report_webapp_and_client_metrics():
+    """One provider: webapp instruments and the client exporter, two readers."""
+    capture = _SeriesCapture()
+    periodic = PeriodicExportingMetricReader(capture, export_interval_millis=200)
+    prometheus, port = _prometheus_reader()
+    provider = MeterProvider(metric_readers=[periodic, prometheus])
+    placed, backlog = _webapp_instruments(provider)
+    exporter = OtelExporter(provider)
+    try:
+        placed.add(2)
+        backlog.set(4)
+        exporter.export(_document(2))
+        _assert_shared_series(capture)
+        _assert_prometheus_mix(port)
+    finally:
+        provider.shutdown()
+
+
+def test_two_periodic_readers_and_prometheus_report_the_same_metrics():
+    """A later periodic reader collects the same series the first reader and Prometheus do."""
+    first = _SeriesCapture()
+    second = _SeriesCapture()
+    periodic = PeriodicExportingMetricReader(first, export_interval_millis=200)
+    prometheus, port = _prometheus_reader()
+    provider = MeterProvider(metric_readers=[periodic, prometheus])
+    placed, backlog = _webapp_instruments(provider)
+    exporter = OtelExporter(provider)
+    provider.add_metric_reader(
+        PeriodicExportingMetricReader(second, export_interval_millis=200)
+    )
+    try:
+        placed.add(2)
+        backlog.set(4)
+        exporter.export(_document(2))
+        _assert_shared_series(first)
+        _assert_shared_series(second)
+        _assert_prometheus_mix(port)
     finally:
         provider.shutdown()

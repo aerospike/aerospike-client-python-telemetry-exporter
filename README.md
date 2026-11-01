@@ -42,6 +42,12 @@ suspends this exporter after three consecutive failures. A failure while
 constructing `OtelExporter` happens on the startup thread, before registration,
 so startup fails.
 
+The webapp records its own instruments on this same provider. Every reader
+on the provider collects those instruments and the client series. A periodic
+reader and a Prometheus reader each report both families. A second periodic
+reader, registered later with `add_metric_reader`, collects the same series.
+The Prometheus scrape is that collection from the provider.
+
 The metrics log file stays the client SDK `MetricsWriter`, with `exporter: file`
 and `report_dir`. This package does not ship a writer.
 
