@@ -2,7 +2,9 @@
 
 How this package turns one client snapshot into OpenTelemetry series. The
 exporter contract, dependencies, and install are in the
-[repository README](../README.md).
+[repository README](../README.md). The field-by-field catalog, snapshot
+shape, and translation rules for a Go or other client exporter are in
+[reference.md](reference.md).
 
 The snapshot is one document per client. The identity is `client_type`,
 `client_version`, `cluster_name`, and `app_id`. Two clients that share those

@@ -5,7 +5,8 @@ the snapshot and calls `export()`. This package translates that snapshot. It
 does not open an OTLP connection and it does not choose HTTP or gRPC.
 
 Series names, labels, tiers, and how a snapshot becomes those series are in
-[docs/metrics.md](docs/metrics.md).
+[docs/metrics.md](docs/metrics.md). The field-by-field catalog for a Go or
+other client exporter is in [docs/reference.md](docs/reference.md).
 
 ## Contract
 
@@ -83,7 +84,8 @@ pip install 'aerospike-client-telemetry-exporter[otel]'
 │   ├── recording/       # in-memory exporter for tests
 │   └── otel/            # OpenTelemetry exporter; optional import
 ├── docs/
-│   └── metrics.md       # series this package publishes
+│   ├── metrics.md       # series this package publishes
+│   └── reference.md     # catalog and snapshot shape for another language
 ├── tests/
 │   ├── unit/
 │   └── integration/     # Aerospike, collector, and optional cloud
