@@ -15,6 +15,11 @@
 The webapp owns the Prometheus library and the scrape server. These tests
 compare one published metric, ``total_nodes``, with the scrape. The second
 test puts a periodic OpenTelemetry reader on the same meter provider.
+
+A webapp meter and ``OtelExporter`` share that provider. A periodic reader
+and a Prometheus reader each collect both families. A second periodic reader
+registered later collects the same families. The Prometheus scrape is that
+collection, not a merge of the periodic exports.
 """
 
 from __future__ import annotations
@@ -154,6 +159,95 @@ def _exercise(cluster) -> None:
     session.upsert(DataSet.of(namespace(), "prometheus_reader").id(1)).put({"n": 1}).execute()
 
 
+_ORDERS_PLACED = "orders_placed"
+_ORDERS_BACKLOG = "orders_backlog"
+_PROMETHEUS_PLACED = "orders_placed_total"
+_PROMETHEUS_BACKLOG = "orders_backlog"
+
+
+class _SeriesCapture(MetricExporter):
+    """Latest value of each ``(scope, name)`` a periodic reader exports."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._values: dict[tuple[str, str], float] = {}
+        self._lock = threading.Lock()
+
+    def export(self, metrics_data, timeout_millis=10_000, **kwargs):
+        found: dict[tuple[str, str], float] = {}
+        for resource in metrics_data.resource_metrics:
+            for scope in resource.scope_metrics:
+                scope_name = scope.scope.name
+                for metric in scope.metrics:
+                    points = list(metric.data.data_points)
+                    if points:
+                        found[(scope_name, metric.name)] = float(points[0].value)
+        with self._lock:
+            self._values.update(found)
+        return MetricExportResult.SUCCESS
+
+    def shutdown(self, timeout_millis=30_000, **kwargs):
+        return None
+
+    def force_flush(self, timeout_millis=10_000):
+        return True
+
+    def value(self, scope: str, name: str) -> float | None:
+        with self._lock:
+            return self._values.get((scope, name))
+
+
+def _webapp_instruments(provider: MeterProvider):
+    orders = provider.get_meter("orders")
+    return orders.create_counter(_ORDERS_PLACED), orders.create_gauge(_ORDERS_BACKLOG)
+
+
+def _record_webapp(placed, backlog) -> None:
+    placed.add(2)
+    backlog.set(4)
+
+
+def _scrape_text(port: int) -> str:
+    with urlopen(f"http://127.0.0.1:{port}/metrics", timeout=5) as response:
+        return response.read().decode()
+
+
+def _prometheus_value(text: str, name: str) -> float:
+    for line in text.splitlines():
+        if line.startswith("#"):
+            continue
+        if line.startswith(name + "{") or line.startswith(name + " "):
+            return float(line.rsplit(" ", 1)[-1])
+    raise AssertionError(f"{name} is absent from the Prometheus scrape")
+
+
+def _wait_for_series(capture: _SeriesCapture, scope: str, name: str, predicate) -> float:
+    deadline = time.monotonic() + CALLBACK_TIMEOUT_SECONDS
+    last = None
+    while time.monotonic() < deadline:
+        last = capture.value(scope, name)
+        if last is not None and predicate(last):
+            return last
+        time.sleep(0.05)
+    raise AssertionError(f"{scope}/{name} is {last}")
+
+
+def _assert_shared_series(capture: _SeriesCapture, published_nodes: float) -> None:
+    assert _wait_for_series(capture, "orders", _ORDERS_PLACED, lambda value: value == 2) == 2
+    assert _wait_for_series(capture, "orders", _ORDERS_BACKLOG, lambda value: value == 4) == 4
+    nodes = _wait_for_series(
+        capture, "aerospike.client", _NODES, lambda value: value == published_nodes
+    )
+    assert nodes == published_nodes
+
+
+def _assert_prometheus_mix(port: int, published_nodes: float) -> None:
+    text = _scrape_text(port)
+    assert _prometheus_value(text, _PROMETHEUS_PLACED) == 2
+    assert _prometheus_value(text, _PROMETHEUS_BACKLOG) == 4
+    assert _prometheus_value(text, _PROMETHEUS_NODES) == published_nodes
+
+
 def test_prometheus_scrape_matches_published_total_nodes():
     host, seed_port = seed_host()
     reader, port = _prometheus_reader()
@@ -201,6 +295,71 @@ def test_prometheus_and_otel_report_the_same_total_nodes():
         while time.monotonic() < deadline and published not in capture.node_counts():
             time.sleep(0.05)
         assert published in capture.node_counts()
+    finally:
+        if cluster is not None:
+            cluster.disable_metrics()
+            cluster.close()
+        provider.shutdown()
+
+
+def test_periodic_and_prometheus_readers_report_webapp_and_client_metrics():
+    """One provider: webapp instruments and the client exporter, two readers."""
+    host, seed_port = seed_host()
+    capture = _SeriesCapture()
+    periodic = PeriodicExportingMetricReader(capture, export_interval_millis=200)
+    prometheus, port = _prometheus_reader()
+    provider = MeterProvider(metric_readers=[periodic, prometheus])
+    placed, backlog = _webapp_instruments(provider)
+    exporter = OtelExporter(provider)
+    cluster = None
+    try:
+        cluster = _connect(host, seed_port)
+    except Exception as exc:
+        provider.shutdown()
+        pytest.skip(f"Aerospike seed {host}:{seed_port} unavailable: {exc}")
+
+    try:
+        _record_webapp(placed, backlog)
+        cluster.add_exporter(exporter)
+        _exercise(cluster)
+        published = _wait_for_publish(exporter)
+        _assert_shared_series(capture, published)
+        _assert_prometheus_mix(port, published)
+    finally:
+        if cluster is not None:
+            cluster.disable_metrics()
+            cluster.close()
+        provider.shutdown()
+
+
+def test_two_periodic_readers_and_prometheus_report_the_same_metrics():
+    """A later periodic reader collects the same series the first reader and Prometheus do."""
+    host, seed_port = seed_host()
+    first = _SeriesCapture()
+    second = _SeriesCapture()
+    periodic = PeriodicExportingMetricReader(first, export_interval_millis=200)
+    prometheus, port = _prometheus_reader()
+    provider = MeterProvider(metric_readers=[periodic, prometheus])
+    placed, backlog = _webapp_instruments(provider)
+    exporter = OtelExporter(provider)
+    provider.add_metric_reader(
+        PeriodicExportingMetricReader(second, export_interval_millis=200)
+    )
+    cluster = None
+    try:
+        cluster = _connect(host, seed_port)
+    except Exception as exc:
+        provider.shutdown()
+        pytest.skip(f"Aerospike seed {host}:{seed_port} unavailable: {exc}")
+
+    try:
+        _record_webapp(placed, backlog)
+        cluster.add_exporter(exporter)
+        _exercise(cluster)
+        published = _wait_for_publish(exporter)
+        _assert_shared_series(first, published)
+        _assert_shared_series(second, published)
+        _assert_prometheus_mix(port, published)
     finally:
         if cluster is not None:
             cluster.disable_metrics()
