@@ -129,14 +129,34 @@ skipped.
 export OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp.nr-data.net/v1/metrics
 export OTEL_EXPORTER_OTLP_GRPC_ENDPOINT=otlp.nr-data.net:4317
 export OTEL_EXPORTER_OTLP_HEADERS=api-key=$NEW_RELIC_LICENSE_KEY
-python -m pytest tests/integration/otel/test_webapp.py::test_webapp_sends_to_an_otlp_cloud_when_configured -v
+python -m pytest tests/integration/otel/test_cloud.py::test_webapp_sends_to_an_otlp_cloud_when_configured -v
 ```
 
-The HTTP URL includes `/v1/metrics`. The gRPC value is host and port `4317`.
-A missing scheme still uses TLS. Both cases use service name
-`python-orders-service`. HTTP points have `app_id` `orders-http`. gRPC points
-have `app_id` `orders-grpc`. Pull-request integration runs the same case when
-Actions secrets of those three names are set.
+One case runs per provider and protocol. A missing URL or required header
+skips that case. The HTTP value is the metrics URL the exporter POSTs to. A
+gRPC value without a scheme still uses TLS. Every case uses service name
+`python-orders-service`. The `app_id` is `orders-<provider>-http` or
+`orders-<provider>-grpc`.
+
+| Provider | HTTP variable | Header variable |
+|---|---|---|
+| New Relic | `OTEL_EXPORTER_OTLP_ENDPOINT` | `OTEL_EXPORTER_OTLP_HEADERS` (`api-key=<license>`) |
+| Datadog | `OTEL_EXPORTER_OTLP_ENDPOINT_DATADOG` | `OTEL_EXPORTER_OTLP_HEADERS_DATADOG` (`dd-api-key=<key>`) |
+| Dynatrace | `OTEL_EXPORTER_OTLP_ENDPOINT_DYNATRACE` | `OTEL_EXPORTER_OTLP_HEADERS_DYNATRACE` (`Authorization=Bearer <token>`) |
+| Amazon CloudWatch | `OTEL_EXPORTER_OTLP_ENDPOINT_CLOUDWATCH` | `OTEL_EXPORTER_OTLP_HEADERS_CLOUDWATCH` (`Authorization=Bearer <token>`) |
+| Google Cloud Monitoring | `OTEL_EXPORTER_OTLP_ENDPOINT_GOOGLE_CLOUD` | `OTEL_EXPORTER_OTLP_HEADERS_GOOGLE_CLOUD` (`Authorization=Bearer <token>`) |
+| Grafana Cloud | `OTEL_EXPORTER_OTLP_ENDPOINT_GRAFANA` | `OTEL_EXPORTER_OTLP_HEADERS_GRAFANA` (`Authorization=Basic <token>`) |
+| Prometheus OTLP receiver | `OTEL_EXPORTER_OTLP_ENDPOINT_PROMETHEUS` | `OTEL_EXPORTER_OTLP_HEADERS_PROMETHEUS`, optional |
+| Sumo Logic | `OTEL_EXPORTER_OTLP_ENDPOINT_SUMOLOGIC` | `OTEL_EXPORTER_OTLP_HEADERS_SUMOLOGIC`, optional (`x-sumo-token=<token>`) |
+| OpenObserve | `OTEL_EXPORTER_OTLP_ENDPOINT_OPENOBSERVE` | `OTEL_EXPORTER_OTLP_HEADERS_OPENOBSERVE` (`Authorization=Basic <token>`) |
+
+New Relic, Dynatrace, Google Cloud Monitoring, Grafana Cloud, and OpenObserve
+also read `OTEL_EXPORTER_OTLP_GRPC_ENDPOINT` with the same suffix as the HTTP
+variable. New Relic's gRPC variable has no suffix. Datadog, CloudWatch,
+Prometheus, and Sumo Logic are HTTP only here. CloudWatch normally
+authenticates with SigV4. This case does not sign a request. It sends the
+bearer token when that header is set. Pull-request integration passes the
+same names from Actions secrets. An unset secret skips that provider.
 
 ## Contributing
 
