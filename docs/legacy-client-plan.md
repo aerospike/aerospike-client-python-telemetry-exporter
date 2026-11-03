@@ -9,19 +9,32 @@ on branch `CLIENT-OM-381` at commit `d7fdf5f2c7483b216e494653a5c303665f44d157`.
 
 ## Summary
 
-The exporter works with the legacy client without any change to its logic.
-Both clients hand `export(snapshot)` an object whose
-`snapshot.to_canonical_dict()` returns the document described in
-[reference.md](reference.md). The work is packaging, documentation of what the
-legacy client does not record, and tests.
+The exporter implementation is shared. Both clients hand `export(snapshot)` an
+object whose `snapshot.to_canonical_dict()` returns the document described in
+[reference.md](reference.md). Customers install one client wheel. That wheel
+depends on the shared wheel, which does not install either client. The work is
+that split, documentation of what the legacy client does not record, and tests.
 
 ```mermaid
 flowchart LR
-  webapp[WebappMeterProvider] --> otel[OtelExporter]
-  sdk["aerospike-sdk Cluster (python-sdk)"] -->|"cluster.add_exporter"| otel
-  legacy["aerospike Client (python)"] -->|"MetricsPolicy.add_exporter"| otel
-  otel --> registry[ClientSnapshotRegistry]
-  registry --> readers["Periodic / Prometheus readers"]
+  sdkWheel["aerospike-client-telemetry-sdk"] --> common["aerospike-client-telemetry"]
+  legacyWheel["aerospike-client-telemetry-legacy"] --> common
+  sdkWheel --> sdkClient["aerospike-sdk"]
+  legacyWheel --> legacyClient["aerospike"]
+  common --> provider["MeterProvider callbacks"]
+```
+
+At runtime the client wheel is only the registration surface. The shared wheel
+owns the registry and the callbacks:
+
+```mermaid
+flowchart LR
+  webapp[WebappMeterProvider] --> shared[SharedPublisher]
+  sdk["aerospike-sdk Cluster"] -->|"cluster.add_exporter"| sdkAdapter[SdkExporter]
+  legacy["aerospike Client"] -->|"MetricsPolicy.add_exporter"| legacyAdapter[LegacyExporter]
+  sdkAdapter --> shared
+  legacyAdapter --> shared
+  shared --> readers["Periodic / Prometheus readers"]
 ```
 
 ## Legacy client contract
@@ -61,12 +74,54 @@ The legacy client sets `operational_metrics_enabled` to `metrics_enabled` and
 
 ## Decisions
 
-- **Packaging:** `aerospike-sdk` stays a core dependency. A new `[legacy]` extra
-  installs the legacy client.
-- **Python floor:** stays `>=3.11`, because `aerospike-sdk` requires 3.11 and is
-  in core. Legacy-client users need Python 3.11 or later to use this exporter.
+- **Packaging:** three wheels from this repo, described under [Wheels](#wheels).
+  There is no `[legacy]` extra and no client dependency on the shared wheel.
+- **Python floor:** stays `>=3.11` on all three wheels.
 - **Unrecorded fields:** the legacy snapshot keeps them present and `0`, and the
   exporter publishes them. This is documented, not changed.
+
+## Wheels
+
+The package version is `0.0.1`, so replacing the single
+`aerospike-client-telemetry-exporter` distribution is acceptable. One `VERSION`
+file is copied into each build. A client wheel depends on
+`aerospike-client-telemetry` at that same version.
+
+| Wheel | Import root | Depends on | What it contains |
+| --- | --- | --- | --- |
+| `aerospike-client-telemetry` | `aerospike_client_telemetry` | Neither client. OpenTelemetry is imported lazily. | Catalog, registry, `to_canonical_dict()` publish path, observable callbacks, recording translation |
+| `aerospike-client-telemetry-sdk` | `aerospike_client_telemetry_sdk` | Shared wheel and `aerospike-sdk>=1.0.0` | Sync and async OTel exporters. Sync and async recording exporters. Registered with `cluster.add_exporter`, then `enable_metrics`. |
+| `aerospike-client-telemetry-legacy` | `aerospike_client_telemetry_legacy` | Shared wheel and `aerospike` at the first release that ships `MetricsPolicy.add_exporter` | Sync OTel exporter and sync recording exporter. Registered with `MetricsPolicy(exporter="custom")`, `add_exporter`, then `enable_metrics`. |
+
+The legacy dependency is branch `CLIENT-OM-381` at `d7fdf5f2`. That branch's
+`VERSION` is `19.3.1` until the release that ships `add_exporter`.
+
+Each client wheel has an `[otel]` extra with `opentelemetry-*>=1.27.0`. A
+recording-only install does not pull OpenTelemetry. The client classes call
+the shared publisher. They do not copy the catalog or the callback loop.
+
+```bash
+pip install "aerospike-client-telemetry-sdk[otel]"
+pip install "aerospike-client-telemetry-legacy[otel]"
+```
+
+```python
+from aerospike_client_telemetry_sdk.otel import OtelExporter, AsyncOtelExporter
+from aerospike_client_telemetry_legacy.otel import OtelExporter as LegacyOtelExporter
+```
+
+Installing both client wheels in one environment is valid. `client_type`
+stays `python-sdk` and `python`, so the shared registry keeps their documents
+apart.
+
+Source layout:
+
+- `packages/telemetry/`
+- `packages/telemetry-sdk/`
+- `packages/telemetry-legacy/`
+
+The root [pyproject.toml](../pyproject.toml) stops being the installable
+project. Tests stay at the repo root and install the wheel they exercise.
 
 ### Fields the legacy client publishes as 0
 
@@ -86,40 +141,34 @@ Other differences:
 
 ## Work items
 
-1. **Packaging.** In [pyproject.toml](../pyproject.toml), add a `legacy` entry
-   under `[project.optional-dependencies]`, pinned to the first `aerospike`
-   release that ships `MetricsPolicy.add_exporter`. Confirm the version before
-   release; the branch `VERSION` is `19.3.1`. Core and `requires-python` stay
-   unchanged.
-2. **Docstrings.** In
-   [otel/exporter.py](../aerospike_client_telemetry/otel/exporter.py) and
-   [recording/exporter.py](../aerospike_client_telemetry/recording/exporter.py),
-   name both hosts of the sync exporters: `aerospike_sdk.sync.Cluster` and the
-   legacy `aerospike.Client` through `MetricsPolicy.add_exporter`. State that
-   the async exporters are SDK only.
-3. **README.** In [README.md](../README.md), add a `[legacy]` row to the
-   dependency table, the install line, and a registration snippet:
-
-   ```bash
-   pip install "aerospike-client-telemetry-exporter[legacy,otel]"
-   ```
+1. **Shared wheel.** Move the catalog, registry, publish path, and recording
+   translation into `packages/telemetry/`. Drop `aerospike-sdk` from its
+   dependencies. Keep `requires-python` at `>=3.11`.
+2. **SDK wheel.** Add `packages/telemetry-sdk/` with sync and async OTel and
+   recording exporters, an `[otel]` extra, and a dependency on
+   `aerospike-sdk>=1.0.0` plus the shared wheel at the same version.
+3. **Legacy wheel.** Add `packages/telemetry-legacy/` with sync exporters only,
+   an `[otel]` extra, and a dependency on `aerospike` at the first release with
+   `MetricsPolicy.add_exporter`.
+4. **README.** In [README.md](../README.md), replace the single install line
+   with the two client wheels and show both registration paths:
 
    ```python
    from aerospike_helpers.metrics import MetricsPolicy
-   from aerospike_client_telemetry.otel import OtelExporter
+   from aerospike_client_telemetry_legacy.otel import OtelExporter
 
    policy = MetricsPolicy(exporter="custom", export_interval=30, labels={"env": "prod"})
    policy.add_exporter(OtelExporter(provider))
    client.enable_metrics(policy)
    ```
 
-4. **metrics.md.** In [metrics.md](metrics.md), add a section "Legacy client
+5. **metrics.md.** In [metrics.md](metrics.md), add a section "Legacy client
    (`client_type=python`)" with the zero-field table and the other differences
    above.
-5. **reference.md.** In [reference.md](reference.md), list the `client_type`
+6. **reference.md.** In [reference.md](reference.md), list the `client_type`
    values (`python-sdk`, `python`), and note that a 0 may mean "not recorded by
    this client" and that per-client coverage is in `metrics.md`.
-6. **Unit test.** Add `tests/unit/otel/test_legacy_client.py`. It needs no live
+7. **Unit test.** Add `tests/unit/otel/test_legacy_client.py`. It needs no live
    client and uses a static fixture copied from the legacy `to_canonical_dict()`
    shape. Assert:
    - Cluster, node, and namespace series appear.
@@ -128,7 +177,7 @@ Other differences:
    - A legacy snapshot and an SDK snapshot on one exporter stay separate by
      `client_type`.
    - Webapp instruments on the same provider still collect.
-7. **Integration test.** Add `tests/integration/otel/test_legacy_client.py`. It
+8. **Integration test.** Add `tests/integration/otel/test_legacy_client.py`. It
    skips through `pytest.importorskip("aerospike")`, and also when
    `MetricsPolicy` has no `add_exporter`. Using the existing Aerospike
    testcontainer fixture, it:
@@ -137,13 +186,14 @@ Other differences:
    - Asserts that `aerospike.client.cluster.total_nodes` and the namespace read
      latency appear with `client_type="python"`, next to a webapp counter on the
      same provider.
-8. **CI.** In [build-test.yml](../.github/workflows/build-test.yml), add an
-   `integration-legacy` job. It pins
-   `LEGACY_REF: d7fdf5f2c7483b216e494653a5c303665f44d157` and installs
+9. **CI.** In [build-test.yml](../.github/workflows/build-test.yml), build all
+   three wheels. SDK tests install the SDK wheel. The legacy job pins
+   `LEGACY_REF: d7fdf5f2c7483b216e494653a5c303665f44d157`, installs the legacy
+   wheel, and installs
    `aerospike @ git+https://github.com/aerospike/aerospike-client-python@${LEGACY_REF}`
    with submodules. This builds the C client and needs `libssl-dev`. The job
    runs the two legacy test files.
-9. **Verify and commit.** Run the unit and integration suites; install the
+10. **Verify and commit.** Run the unit and integration suites; install the
    legacy client from a local checkout to run the legacy integration test for
    real. Make one conventional commit per item, then push.
 
@@ -175,3 +225,7 @@ registry keys, so a new SDK field does not overwrite a legacy document.
 - Splitting the legacy `timeout_count` into client and server timeouts.
 - Async export for the legacy client.
 - Lowering the Python floor below 3.11.
+- A `[legacy]` extra on one wheel that also installs `aerospike-sdk`.
+- Copying the catalog, registry, or callback loop into a client wheel.
+- Replaying intermediate gauge values through the observable callback. The
+  meter provider keeps one point per series per collect.
