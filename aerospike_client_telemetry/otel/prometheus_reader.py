@@ -607,12 +607,24 @@ def _family(
 class CustomPrometheusMetricReader(MetricReader):
     """Read OpenTelemetry metrics into a Prometheus registry.
 
-    The constructor accepts conversion settings and a ``CollectorRegistry``.
-    It does not accept an HTTP server and does not bind a socket. Call
-    ``OtelExporter.start_http_server`` to serve this registry.
-    ``MeterProvider.shutdown()`` calls ``shutdown()``, which unregisters the
-    collector and stops the server that method started. This class does not
-    install SIGTERM or SIGINT handlers.
+    The conversion arguments match ``PrometheusMetricReader`` from
+    ``opentelemetry-exporter-prometheus`` 0.66b1. ``disable_target_info``,
+    ``prefix``, and ``scope_info_enabled`` may be positional.
+    ``resource_attribute_filter`` and ``registry`` are keyword-only.
+
+    ``disable_target_info`` defaults to false and publishes ``target_info``.
+    ``prefix`` defaults to an empty string and is not applied to
+    ``target_info``. ``scope_info_enabled`` defaults to true and adds the
+    ``otel_scope_*`` labels. ``resource_attribute_filter`` defaults to
+    ``None``, which copies no resource attributes onto series. ``registry``
+    defaults to a private ``CollectorRegistry``.
+
+    Temporality is cumulative for every instrument class and is not a
+    constructor argument. This class does not accept an HTTP server and does
+    not bind a socket. Call ``OtelExporter.start_http_server`` to serve this
+    registry. ``MeterProvider.shutdown()`` calls ``shutdown()``, which
+    unregisters the collector and stops the server that method started. This
+    class does not install SIGTERM or SIGINT handlers.
     """
 
     def __init__(

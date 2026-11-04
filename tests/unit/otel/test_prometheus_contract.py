@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import multiprocessing
 import signal
@@ -467,3 +468,234 @@ def test_scrape_text_matches_the_pinned_otel_prometheus_reader():
     official = render(lambda registry: PrometheusMetricReader(registry=registry))
     custom = render(lambda registry: CustomPrometheusMetricReader(registry=registry))
     assert custom.splitlines() == official.splitlines()
+
+
+def test_gauge_and_counter_text_matches_the_official_prometheus_reader():
+    """Sync and observable gauges and counters scrape to the same text."""
+    pytest.importorskip("opentelemetry.exporter.prometheus")
+    from opentelemetry.exporter.prometheus import PrometheusMetricReader
+
+    resource = Resource.create({"service.name": "orders"})
+
+    def render(reader_factory):
+        registry = CollectorRegistry()
+        reader = reader_factory(registry)
+        provider = MeterProvider(metric_readers=[reader], resource=resource)
+        meter = provider.get_meter("orders", "1.0.0")
+        placed = meter.create_counter(
+            "orders.placed", unit="{order}", description="Orders placed"
+        )
+        backlog = meter.create_gauge(
+            "orders.backlog", unit="{order}", description="Orders waiting"
+        )
+        meter.create_observable_counter(
+            "orders.observed",
+            callbacks=[lambda options: [Observation(5)]],
+            description="Observed orders",
+        )
+        meter.create_observable_gauge(
+            "orders.depth",
+            callbacks=[lambda options: [Observation(3)]],
+            description="Observed depth",
+        )
+        try:
+            placed.add(2, {"lane": "a"})
+            placed.add(1, {"lane": "b"})
+            backlog.set(4)
+            return generate_latest(registry).decode()
+        finally:
+            provider.shutdown()
+
+    official = render(lambda registry: PrometheusMetricReader(registry=registry))
+    custom = render(lambda registry: CustomPrometheusMetricReader(registry=registry))
+    assert custom.splitlines() == official.splitlines()
+    assert "# TYPE orders_placed_total counter" in custom
+    assert "# TYPE orders_backlog gauge" in custom
+    assert "# TYPE orders_observed_total counter" in custom
+    assert "# TYPE orders_depth gauge" in custom
+    assert _value(custom, "orders_placed_total") == 2
+    assert _value(custom, "orders_backlog") == 4
+    assert _value(custom, "orders_observed_total") == 5
+    assert _value(custom, "orders_depth") == 3
+
+
+def test_filter_and_registry_are_keyword_only_like_the_official_reader():
+    """The star in ``__init__`` matches ``PrometheusMetricReader``.
+
+    ``disable_target_info``, ``prefix``, and ``scope_info_enabled`` may be
+    positional. ``resource_attribute_filter`` and ``registry`` are keyword-only.
+    """
+    pytest.importorskip("opentelemetry.exporter.prometheus")
+    from opentelemetry.exporter.prometheus import PrometheusMetricReader
+
+    custom = inspect.signature(CustomPrometheusMetricReader.__init__)
+    official = inspect.signature(PrometheusMetricReader.__init__)
+    names = (
+        "disable_target_info",
+        "prefix",
+        "scope_info_enabled",
+        "resource_attribute_filter",
+        "registry",
+    )
+    for name in names:
+        assert custom.parameters[name].kind is official.parameters[name].kind
+    assert custom.parameters["disable_target_info"].default is False
+    assert custom.parameters["prefix"].default == ""
+    assert custom.parameters["scope_info_enabled"].default is True
+    assert custom.parameters["resource_attribute_filter"].default is None
+    assert custom.parameters["resource_attribute_filter"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert custom.parameters["registry"].kind is inspect.Parameter.KEYWORD_ONLY
+    with pytest.raises(TypeError):
+        CustomPrometheusMetricReader(False, "", True, None)
+
+
+def _record_depth(meter) -> None:
+    meter.create_counter(
+        "requests.processed", unit="By", description="Processed requests"
+    ).add(2)
+    meter.create_gauge("queue.depth", description="Current queue depth").set(4)
+
+
+def _paired_scrape(record, **settings) -> str:
+    """Scrape the same instruments with both readers and require equal text."""
+    pytest.importorskip("opentelemetry.exporter.prometheus")
+    from opentelemetry.exporter.prometheus import PrometheusMetricReader
+
+    resource = Resource.create({"service.name": "orders", "cloud.region": "east"})
+
+    def render(reader_factory):
+        registry = CollectorRegistry()
+        reader = reader_factory(registry)
+        provider = MeterProvider(metric_readers=[reader], resource=resource)
+        try:
+            record(provider.get_meter("web.app", "1.2.3"))
+            return generate_latest(registry).decode()
+        finally:
+            provider.shutdown()
+
+    official = render(lambda registry: PrometheusMetricReader(registry=registry, **settings))
+    custom = render(lambda registry: CustomPrometheusMetricReader(registry=registry, **settings))
+    assert custom.splitlines() == official.splitlines()
+    return custom
+
+
+def _series_line(text: str, name: str) -> str:
+    for line in text.splitlines():
+        if line.startswith(name + "{") or line.startswith(name + " "):
+            return line
+    raise AssertionError(f"{name} is absent from the Prometheus scrape")
+
+
+def test_disable_target_info_matches_the_official_reader():
+    shown = _paired_scrape(_record_depth, disable_target_info=False)
+    assert "# TYPE target_info gauge" in shown
+    info = _series_line(shown, "target_info")
+    assert 'service_name="orders"' in info
+    assert 'cloud_region="east"' in info
+    hidden = _paired_scrape(_record_depth, disable_target_info=True)
+    assert "target_info" not in hidden
+    assert _value(hidden, "queue_depth") == 4
+    assert _value(hidden, "requests_processed_bytes_total") == 2
+
+
+def test_prefix_matches_the_official_reader():
+    plain = _paired_scrape(_record_depth, prefix="")
+    assert "# TYPE queue_depth gauge" in plain
+    assert "app_queue_depth" not in plain
+    prefixed = _paired_scrape(_record_depth, prefix="app")
+    assert "# TYPE app_queue_depth gauge" in prefixed
+    assert "# TYPE app_requests_processed_bytes_total counter" in prefixed
+    assert "# TYPE target_info gauge" in prefixed
+    assert not any(line.startswith("queue_depth") for line in prefixed.splitlines())
+
+
+def test_scope_info_matches_the_official_reader():
+    enabled = _paired_scrape(_record_depth, scope_info_enabled=True)
+    depth = _series_line(enabled, "queue_depth")
+    assert 'otel_scope_name="web.app"' in depth
+    assert 'otel_scope_version="1.2.3"' in depth
+    assert 'otel_scope_schema_url=""' in depth
+    disabled = _paired_scrape(_record_depth, scope_info_enabled=False)
+    depth = _series_line(disabled, "queue_depth")
+    assert "otel_scope_" not in depth
+    assert _value(disabled, "queue_depth") == 4
+
+
+def test_resource_attribute_filter_matches_the_official_reader():
+    unfiltered = _paired_scrape(_record_depth, resource_attribute_filter=None)
+    depth = _series_line(unfiltered, "queue_depth")
+    assert "service_name" not in depth
+    assert "cloud_region" not in depth
+    info = _series_line(unfiltered, "target_info")
+    assert 'service_name="orders"' in info
+    assert 'cloud_region="east"' in info
+
+    filtered = _paired_scrape(
+        _record_depth,
+        resource_attribute_filter=lambda name: name == "service.name",
+    )
+    depth = _series_line(filtered, "queue_depth")
+    assert 'service_name="orders"' in depth
+    assert "cloud_region" not in depth
+    info = _series_line(filtered, "target_info")
+    assert 'service_name="orders"' in info
+    assert 'cloud_region="east"' in info
+
+
+def test_registry_matches_the_official_reader():
+    """An explicit registry receives the scrape and the process registry does not."""
+    pytest.importorskip("opentelemetry.exporter.prometheus")
+    from opentelemetry.exporter.prometheus import PrometheusMetricReader
+    from prometheus_client import REGISTRY
+
+    resource = Resource.create({"service.name": "orders"})
+
+    def render(reader, registry) -> str:
+        provider = MeterProvider(metric_readers=[reader], resource=resource)
+        try:
+            provider.get_meter("web.app", "1.2.3").create_gauge("queue.depth").set(4)
+            return generate_latest(registry).decode()
+        finally:
+            provider.shutdown()
+
+    custom_registry = CollectorRegistry()
+    official_registry = CollectorRegistry()
+    custom_text = render(
+        CustomPrometheusMetricReader(registry=custom_registry), custom_registry
+    )
+    official_text = render(
+        PrometheusMetricReader(registry=official_registry), official_registry
+    )
+    assert custom_text.splitlines() == official_text.splitlines()
+    assert "queue_depth" not in generate_latest(REGISTRY).decode()
+
+    private = CustomPrometheusMetricReader()
+    private_text = render(private, private.registry)
+    fresh = CollectorRegistry()
+    official_private = render(PrometheusMetricReader(registry=fresh), fresh)
+    assert private_text.splitlines() == official_private.splitlines()
+    assert private.registry is not REGISTRY
+
+
+def test_preferred_temporality_matches_the_official_reader():
+    pytest.importorskip("opentelemetry.exporter.prometheus")
+    from opentelemetry.exporter.prometheus import PrometheusMetricReader
+
+    custom = CustomPrometheusMetricReader(registry=CollectorRegistry())
+    official = PrometheusMetricReader(registry=CollectorRegistry())
+    try:
+        assert custom._instrument_class_temporality == official._instrument_class_temporality
+        assert set(custom._instrument_class_temporality.values()) == {
+            AggregationTemporality.CUMULATIVE
+        }
+    finally:
+        custom.shutdown()
+        official.shutdown()
+
+    def record(meter) -> None:
+        counter = meter.create_counter("requests.processed", description="Processed requests")
+        counter.add(2)
+        counter.add(3)
+
+    text = _paired_scrape(record)
+    assert _value(text, "requests_processed_total") == 5

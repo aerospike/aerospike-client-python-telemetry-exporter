@@ -20,8 +20,10 @@ OpenTelemetry reader on the same meter provider.
 A webapp meter and ``OtelExporter`` share that provider. A periodic reader
 and a Prometheus reader each collect both families. A second periodic reader
 registered later collects the same families. The Prometheus scrape is that
-collection, not a merge of the periodic exports. Certificates are minted in a
-temporary directory and are not checked in.
+collection, not a merge of the periodic exports. One test compares this
+reader with the pinned OpenTelemetry Prometheus reader while operational
+metrics are disabled and again while they are enabled. Certificates are
+minted in a temporary directory and are not checked in.
 """
 
 from __future__ import annotations
@@ -641,3 +643,74 @@ def test_webapp_http_server_appends_published_client_metrics_over_mutual_tls():
             cluster.close()
             provider.shutdown()
             _stop_webapp(httpd, thread)
+
+
+def _wait_for_operational(exporter: OtelExporter, enabled: bool) -> dict:
+    deadline = time.monotonic() + CALLBACK_TIMEOUT_SECONDS
+    last = None
+    while time.monotonic() < deadline:
+        for key in exporter.registry.client_keys():
+            document = exporter.registry.current(key)
+            if not isinstance(document, dict):
+                continue
+            last = document
+            flag = document.get("operational_metrics_enabled") is True
+            if (
+                flag is enabled
+                and isinstance(document.get("total_nodes"), (int, float))
+                and isinstance(document.get("command_count"), (int, float))
+            ):
+                return document
+        time.sleep(0.05)
+    raise AssertionError(f"operational_metrics_enabled={enabled} was not published: {last}")
+
+
+def _type_line(text: str, name: str, kind: str) -> bool:
+    return any(
+        line.startswith("# TYPE ") and name in line and line.endswith(" " + kind)
+        for line in text.splitlines()
+    )
+
+
+def test_custom_reader_matches_official_reader_for_enabled_and_disabled_metrics():
+    """Live gauges and counters match the pinned reader in both operational modes."""
+    pytest.importorskip("opentelemetry.exporter.prometheus")
+    from opentelemetry.exporter.prometheus import PrometheusMetricReader
+    from prometheus_client import generate_latest
+
+    host, seed_port = seed_host()
+    custom_registry = CollectorRegistry()
+    official_registry = CollectorRegistry()
+    custom = CustomPrometheusMetricReader(registry=custom_registry)
+    official = PrometheusMetricReader(registry=official_registry)
+    provider = MeterProvider(metric_readers=[custom, official])
+    exporter = OtelExporter(provider)
+    cluster = None
+    try:
+        cluster = _connect(host, seed_port)
+    except Exception as exc:
+        provider.shutdown()
+        pytest.skip(f"Aerospike seed {host}:{seed_port} unavailable: {exc}")
+
+    try:
+        cluster.add_exporter(exporter)
+        session = cluster.create_session()
+        for operational in (False, True):
+            cluster.enable_metrics(MetricsPolicy(operational_enabled=operational))
+            session.upsert(DataSet.of(namespace(), "prometheus_reader").id(1)).put({"n": 1}).execute()
+            document = _wait_for_operational(exporter, operational)
+            cluster.disable_metrics()
+            custom_text = generate_latest(custom_registry).decode()
+            official_text = generate_latest(official_registry).decode()
+            assert custom_text.splitlines() == official_text.splitlines()
+            assert _type_line(custom_text, "total_nodes", "gauge")
+            assert _type_line(custom_text, "invalid_node_count", "counter")
+            if operational:
+                assert document.get("operational_metrics_enabled") is True
+                assert "cpu_percent" in custom_text
+            else:
+                assert "cpu_percent" not in custom_text
+    finally:
+        cluster.disable_metrics()
+        cluster.close()
+        provider.shutdown()

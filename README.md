@@ -49,8 +49,12 @@ reader and a Prometheus reader each report both families. A second periodic
 reader, registered later with `add_metric_reader`, collects the same series.
 The Prometheus scrape is that collection from the provider.
 
-The reader is constructed with its conversion settings. Either side can serve
-the registry, in plaintext, TLS, or mutual TLS:
+The reader is constructed with the same conversion settings as
+`PrometheusMetricReader` from `opentelemetry-exporter-prometheus` 0.66b1:
+target info, name prefix, scope labels, an optional resource-attribute
+filter, and a registry. Temporality is cumulative and is not a constructor
+argument. Either side can serve the registry, in plaintext, TLS, or mutual
+TLS:
 
 - `exporter.start_http_server` opens the scrape port. `provider.shutdown()`
   stops that server.

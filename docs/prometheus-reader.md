@@ -47,6 +47,45 @@ Certificate and key files belong to the application. This package does not
 ship them. Tests mint them with `openssl` in a temporary directory, and
 `.gitignore` ignores `*.pem`, `*.crt`, `*.csr`, `*.key`, and `*.srl`.
 
+## Constructor
+
+`CustomPrometheusMetricReader` takes the same conversion arguments as
+`PrometheusMetricReader` in `opentelemetry-exporter-prometheus` 0.66b1. A unit
+test scrapes both readers for each argument and requires the same text.
+Temporality is not one of those arguments.
+
+`disable_target_info`, `prefix`, and `scope_info_enabled` may be passed by
+position. The `*` in the signature makes `resource_attribute_filter` and
+`registry` keyword-only. The upstream reader uses that same split.
+
+| Argument | Default | Effect |
+|---|---|---|
+| `disable_target_info` | `False` | `False` publishes a `target_info` gauge carrying every resource attribute. `True` omits that metric. The other series are still published. |
+| `prefix` | `""` | An empty prefix leaves names unchanged. Any other value is prepended, so `queue.depth` becomes `app_queue_depth` when the prefix is `app`. `target_info` is not prefixed. |
+| `scope_info_enabled` | `True` | `True` adds `otel_scope_name`, `otel_scope_version`, and `otel_scope_schema_url` on each series. `False` omits those labels. |
+| `resource_attribute_filter` | `None` | `None` copies no resource attributes onto series. They remain on `target_info` when that metric is enabled. A callback receives the original attribute key and returns true to copy that attribute onto every series. Copied keys are sanitized to Prometheus label names. `disable_target_info` does not change this filter. |
+| `registry` | a new `CollectorRegistry` | The reader writes into this registry. Omitting it creates a private registry, so the scrape does not join the process-wide Prometheus registry. The upstream reader defaults to that process-wide registry. Pass `registry=` to either reader to choose the registry. |
+
+```python
+prom_reader = CustomPrometheusMetricReader(
+    disable_target_info=False,
+    prefix="app",
+    scope_info_enabled=True,
+    resource_attribute_filter=lambda name: name == "service.name",
+    registry=registry,
+)
+```
+
+With that filter, `service.name=orders` and `cloud.region=east` both stay on
+`target_info`. Each series gains `service_name="orders"` and does not gain
+`cloud_region`.
+
+Both readers request cumulative temporality for `Counter`, `UpDownCounter`,
+`Histogram`, `ObservableCounter`, `ObservableUpDownCounter`, and
+`ObservableGauge`. Neither constructor accepts a temporality map, so a caller
+cannot switch one of those types to delta. Two adds on one counter scrape as
+the cumulative total.
+
 ## Use cases
 
 ### Exporter-owned scrape server
@@ -157,12 +196,13 @@ registered on the provider and passes one `MetricsData` batch to
 `_receive_metrics`. A periodic OTLP reader collects independently and can
 observe a different snapshot generation.
 
-Counters request cumulative temporality. Monotonic sums become Prometheus
-counters. Cumulative non-monotonic sums become gauges. Gauges stay gauges.
-Histograms become Prometheus histograms. Any other metric type is logged and
-omitted. Names, units, help text, and labels follow the 0.66b1 exporter,
-including its leading-digit sanitizing. Aerospike metric names are not
-hardcoded. Scrapes are serialized so each response is one complete batch.
+Temporality is cumulative for every instrument class, as described under
+Constructor. Monotonic sums become Prometheus counters. Cumulative
+non-monotonic sums become gauges. Gauges stay gauges. Histograms become
+Prometheus histograms. Any other metric type is logged and omitted. Names,
+units, help text, and labels follow the 0.66b1 exporter, including its
+leading-digit sanitizing. Aerospike metric names are not hardcoded. Scrapes
+are serialized so each response is one complete batch.
 
 ## Replacing it with the upstream reader
 

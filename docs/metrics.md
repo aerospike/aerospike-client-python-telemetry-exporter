@@ -24,8 +24,10 @@ Every metric is `aerospike.client.<context>.<stat>`. The context stays in the
 name: `cluster`, `node`, `namespace`, or `feature`. For example,
 `aerospike.client.cluster.command_count` and
 `aerospike.client.node.connections_in_use`. A Prometheus exporter replaces
-each dot with an underscore, so the same series is
-`aerospike_client_<context>_<stat>` there.
+each dot with an underscore. Counters also gain a `_total` suffix. The Python
+scrape reader follows `PrometheusMetricReader` 0.66b1, including cumulative
+temporality. Its constructor is documented in
+[prometheus-reader.md](prometheus-reader.md).
 
 | Metric | Kind | Tier | Where it comes from |
 |---|---|---|---|
