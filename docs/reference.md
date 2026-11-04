@@ -96,12 +96,13 @@ Then the `labels` map on the document. A key in the table above is renamed
 the same way. An exported name that is already set, or that is in the
 reserved set below, is dropped. Exporter values win.
 
-`client_app_ip` is on every series. The `labels` entry wins. When it is
-absent, the fallback is the local address of the default route: a UDP socket
-connects to `192.0.2.1` port `1` and `getsockname()` returns the address the
-kernel would use. That connect sends no packet. A successful lookup is kept
-for the process. A failed lookup omits the label and is tried again on the
-next series. The result can differ from the service, pod, or node address.
+`client_app_ip` is not a series label. A pod address would create one series
+per pod. `client_app_ip()` still returns the local address of the default
+route: a UDP socket connects to `192.0.2.1` port `1` and `getsockname()`
+returns the address the kernel would use. That connect sends no packet. A
+successful lookup is kept for the process. A failed lookup returns an empty
+string and is tried again on the next call. A `labels` entry named
+`client_app_ip` is dropped and is not published.
 
 Point labels are applied last. Node series add `server_node_id` from
 `node_name`, `server_node_address` from `node_address`, and

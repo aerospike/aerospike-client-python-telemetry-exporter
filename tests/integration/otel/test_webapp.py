@@ -167,7 +167,7 @@ def test_orders_webapp_exports_client_telemetry():
         assert document["client_type"] == "python-sdk"
         assert document["app_id"] == "orders-service"
         assert document["labels"] == _webapp_labels()
-        assert series_attributes(document)["client_app_ip"] == client_app_ip()
+        assert "client_app_ip" not in series_attributes(document)
         assert document["operational_metrics_enabled"] is True
         assert document["usage_metrics_enabled"] is True
         assert document["usage"]["blocking"] >= 1

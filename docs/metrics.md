@@ -52,21 +52,19 @@ open, TLS, or auth failure stays on the node
 That is a different series from the cluster validation counters above.
 
 Labels on every series include `cluster`, `client_type`, `client_version`,
-`app_id`, and `client_app_ip`. They stay metric labels. Whether a
-client-object identifier should separate two clients that share those four
-values is an open question for the client team. Node series add
-`server_node_id`, `server_node_address`, and `server_node_port`. Namespace
-series also add `ns`. Those names stay, because the shorter spec names are
-generic enough to collide with application labels. A webapp label that uses
-one of the exported names is dropped. Exporter values win. Revisit the node
-and namespace names if the client or product team wants the spec names.
+and `app_id`. Whether a client-object identifier should separate two clients
+that share those four values is an open question for the client team. Node
+series add `server_node_id`, `server_node_address`, and `server_node_port`.
+Namespace series also add `ns`. Those names stay, because the shorter spec
+names are generic enough to collide with application labels. A webapp label
+that uses one of the exported names is dropped. Exporter values win. Revisit
+the node and namespace names if the client or product team wants the spec
+names.
 
-The webapp sets `client_app_ip` to the address it wants published. When that
-label is absent, the fallback is the local address of the default route: a
-UDP socket connects to `192.0.2.1` and `getsockname()` returns the address
-the kernel would use. That connect sends no packet. The result can be a
-different address from the service, pod, or node address. If the lookup
-fails, the label is omitted.
+`client_app_ip` is not a series label. In Kubernetes the default-route
+address is the pod address, so the label would create one series per pod.
+`client_app_ip()` still returns that address for a caller that wants it. A
+webapp label of the same name is dropped and is not published.
 
 A node that has left and is still absent is listed in `nodes_departed`.
 Its final counters are published with the live nodes. The same node name in

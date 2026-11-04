@@ -547,7 +547,7 @@ def test_webapp_pushes_a_client_metric_to_the_collector(otel_collector, grpc):
         assert command["metric"]["app_id"] == "orders-service"
         assert command["metric"]["cluster"] == "telemetry-it"
         assert command["metric"]["environment"] == "prod"
-        assert command["metric"]["client_app_ip"] == client_app_ip()
+        assert "client_app_ip" not in command["metric"]
         assert command["metric"]["service_name"] == "orders-service"
         assert float(command["value"][1]) == tally.recorded_commands
         assert _feature_count(series, "blocking") == tally.recorded_commands

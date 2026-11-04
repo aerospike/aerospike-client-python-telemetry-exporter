@@ -71,20 +71,16 @@ def test_one_label_rename_applies_to_every_metric():
     assert CATALOG.by_source("recover_queue_size").kind is InstrumentKind.GAUGE
 
 
-def test_client_app_ip_is_on_every_series(monkeypatch):
-    monkeypatch.setattr(
-        "aerospike_client_telemetry.common.catalog.client_app_ip",
-        lambda: "198.51.100.8",
-    )
+def test_client_app_ip_is_not_a_series_label():
     document = _document()
     command = series_attributes(document)
     _, extra = next(iter_metric_points(document, CATALOG.by_source("namespace.errors")))
     errors = series_attributes(document, extra)
-    assert command["client_app_ip"] == "198.51.100.8"
-    assert errors["client_app_ip"] == command["client_app_ip"]
+    assert "client_app_ip" not in command
+    assert "client_app_ip" not in errors
     assert errors["ns"] == "test"
     document["labels"] = {**document["labels"], "client_app_ip": "203.0.113.10"}
-    assert series_attributes(document)["client_app_ip"] == "203.0.113.10"
+    assert "client_app_ip" not in series_attributes(document)
 
 
 def test_latency_buckets_are_cumulative_observable_counters():

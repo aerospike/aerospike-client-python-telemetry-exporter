@@ -448,14 +448,15 @@ def rename_label(name: str, label_map: Optional[Mapping[str, str]] = None) -> st
 
 
 def client_app_ip() -> str:
-    """Local address of the default route, when the app does not set one.
+    """Local address of the default route.
 
     A UDP socket connected to ``192.0.2.1`` sends no packet. ``getsockname``
     then returns the address the kernel would use for the default route.
-    That address is often not the service, pod, or node address the app
-    wants published. The app sets the ``client_app_ip`` label to choose the
-    published address. This lookup is only the fallback. If it fails, the
-    label is omitted.
+    That address is often a pod address in Kubernetes. Publishing it as a
+    metric label would create one series per pod, so
+    :func:`series_attributes` does not add ``client_app_ip``. Callers that
+    need the address can still use this function. If the lookup fails, the
+    result is an empty string.
     """
     global _client_app_ip
     if _client_app_ip:
@@ -477,11 +478,11 @@ def series_attributes(
     """Labels for one series.
 
     Identity is renamed through the global map. A webapp label that lands on
-    a reserved name is dropped. ``client_app_ip`` is on every series. The
-    webapp label wins. When the webapp does not set it, the fallback is the
-    default-route address from :func:`client_app_ip`. ``extra`` holds
-    dimensions for this point, such as ``server_node_id`` or ``ns``, and
-    those are renamed by the same map.
+    a reserved name is dropped. ``client_app_ip`` is not a series label: a
+    pod address would multiply every series by the number of pods.
+    :func:`client_app_ip` still resolves that address for callers that want
+    it. ``extra`` holds dimensions for this point, such as ``server_node_id``
+    or ``ns``, and those are renamed by the same map.
     """
     attributes: dict[str, str] = {}
     for source in _IDENTITY:
@@ -493,13 +494,14 @@ def series_attributes(
     if isinstance(labels, Mapping):
         for key, value in labels.items():
             exported = rename_label(str(key), label_map)
-            if exported in RESERVED_LABELS or exported in attributes:
+            if (
+                str(key) == _CLIENT_APP_IP_LABEL
+                or exported == _CLIENT_APP_IP_LABEL
+                or exported in RESERVED_LABELS
+                or exported in attributes
+            ):
                 continue
             attributes[exported] = str(value)
-    if _CLIENT_APP_IP_LABEL not in attributes:
-        app_ip = client_app_ip()
-        if app_ip:
-            attributes[_CLIENT_APP_IP_LABEL] = app_ip
     if extra:
         for key, value in extra.items():
             if value is None or value == "":
