@@ -32,7 +32,8 @@ def test_importing_otel_does_not_import_opentelemetry():
             "-c",
             "import sys; import aerospike_client_telemetry.otel; "
             "assert not any(name == 'opentelemetry' or "
-            "name.startswith('opentelemetry.') for name in sys.modules)",
+            "name.startswith('opentelemetry.') for name in sys.modules); "
+            "assert 'prometheus_client' not in sys.modules",
         ],
         check=False,
         capture_output=True,

@@ -234,7 +234,12 @@ Every reader on the provider collects the application's own instruments and
 these client instruments. A periodic reader and a Prometheus reader each
 report both families. A second periodic reader registered on that provider
 collects the same series. The Prometheus scrape is that collection from the
-provider.
+provider. The application serves it with `exporter.start_http_server`, which
+accepts TLS and mutual TLS and stops on `provider.shutdown()`, or with its
+own `prometheus_client` server on a registry passed to the reader. That
+webapp server keeps its TLS settings and keeps running after
+`provider.shutdown()`. Details are in
+[prometheus-reader.md](prometheus-reader.md).
 
 A slower reader publishes only the newest document. A cumulative counter that
 is still on the new document keeps its latest absolute total. A series that

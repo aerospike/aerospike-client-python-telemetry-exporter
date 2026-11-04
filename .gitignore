@@ -72,3 +72,11 @@ target/
 .trunk/logs/
 .trunk/notifications/
 .trunk/plugins/
+
+# Test certificates and private keys are generated at runtime.
+*.pem
+*.crt
+*.csr
+*.key
+*.srl
+**/certs/

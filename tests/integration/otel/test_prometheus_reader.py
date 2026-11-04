@@ -10,23 +10,29 @@
 # License for the specific language governing permissions and limitations under
 # the License.
 
-"""A live client, scraped through the webapp's Prometheus reader.
+"""A live client, scraped through the Prometheus reader.
 
-The webapp owns the Prometheus library and the scrape server. These tests
-compare one published metric, ``total_nodes``, with the scrape. The second
-test puts a periodic OpenTelemetry reader on the same meter provider.
+One test uses only ``CustomPrometheusMetricReader`` and the exporter's HTTP
+server. The webapp tests serve that registry with the webapp's own HTTP
+server, in plaintext, TLS, and mutual TLS. The other tests put a periodic
+OpenTelemetry reader on the same meter provider.
 
 A webapp meter and ``OtelExporter`` share that provider. A periodic reader
 and a Prometheus reader each collect both families. A second periodic reader
 registered later collects the same families. The Prometheus scrape is that
-collection, not a merge of the periodic exports.
+collection, not a merge of the periodic exports. Certificates are minted in a
+temporary directory and are not checked in.
 """
 
 from __future__ import annotations
 
 import socket
+import ssl
+import tempfile
 import threading
 import time
+from pathlib import Path
+from urllib.error import URLError
 from urllib.request import urlopen
 
 import pytest
@@ -44,17 +50,20 @@ from tests.integration.support import (
 )
 
 pytest.importorskip("opentelemetry.sdk.metrics")
-pytest.importorskip("opentelemetry.exporter.prometheus")
+pytest.importorskip("prometheus_client")
 
-from opentelemetry.exporter.prometheus import PrometheusMetricReader
+from aerospike_client_telemetry.otel.prometheus_reader import (
+    CollectorRegistry,
+    CustomPrometheusMetricReader,
+)
 from opentelemetry.sdk.metrics import MeterProvider
+from prometheus_client import Counter, start_http_server
+from tests.prometheus_certs import mint_certificates, needs_openssl, tls_client
 from opentelemetry.sdk.metrics.export import (
     MetricExportResult,
     MetricExporter,
     PeriodicExportingMetricReader,
 )
-from prometheus_client import CollectorRegistry, start_http_server
-
 pytestmark = pytest.mark.integration
 
 _NODES = "aerospike.client.cluster.total_nodes"
@@ -87,18 +96,51 @@ class _Capture(MetricExporter):
             return list(self._values)
 
 
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+def _prometheus_reader() -> CustomPrometheusMetricReader:
+    return CustomPrometheusMetricReader(registry=CollectorRegistry())
 
 
-def _prometheus_reader() -> tuple[PrometheusMetricReader, int]:
-    registry = CollectorRegistry()
-    reader = PrometheusMetricReader(registry=registry)
-    port = _free_port()
-    start_http_server(port, addr="127.0.0.1", registry=registry)
-    return reader, port
+def _serve(exporter: OtelExporter) -> int:
+    return exporter.start_http_server(host="127.0.0.1", port=0).port
+
+
+def _webapp_http(
+    registry: CollectorRegistry,
+    *,
+    certfile: str | None = None,
+    keyfile: str | None = None,
+    client_cafile: str | None = None,
+    client_auth_required: bool = False,
+):
+    """The webapp's own Prometheus server. This package does not own it."""
+    tls = {}
+    if certfile is not None:
+        tls = {
+            "certfile": certfile,
+            "keyfile": keyfile,
+            "client_cafile": client_cafile,
+            "client_auth_required": client_auth_required,
+            "tls_min_version": ssl.TLSVersion.TLSv1_2,
+            "tls_max_version": ssl.TLSVersion.TLSv1_3,
+        }
+    httpd, thread = start_http_server(0, addr="127.0.0.1", registry=registry, **tls)
+    port = int(httpd.server_address[1])
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                return httpd, thread, port
+        except OSError:
+            time.sleep(0.01)
+    httpd.shutdown()
+    thread.join(1)
+    raise AssertionError("webapp Prometheus server did not accept connections")
+
+
+def _stop_webapp(httpd, thread) -> None:
+    httpd.shutdown()
+    httpd.server_close()
+    thread.join(5)
 
 
 def _scrape_nodes(port: int) -> float:
@@ -207,9 +249,25 @@ def _record_webapp(placed, backlog) -> None:
     backlog.set(4)
 
 
-def _scrape_text(port: int) -> str:
-    with urlopen(f"http://127.0.0.1:{port}/metrics", timeout=5) as response:
+def _scrape_text(port: int, context: ssl.SSLContext | None = None) -> str:
+    scheme = "https" if context is not None else "http"
+    with urlopen(f"{scheme}://127.0.0.1:{port}/metrics", timeout=5, context=context) as response:
         return response.read().decode()
+
+
+def _webapp_tls(registry: CollectorRegistry, root: Path, *, mutual: bool):
+    return _webapp_http(
+        registry,
+        certfile=str(root / "server.crt"),
+        keyfile=str(root / "server.key"),
+        client_cafile=str(root / "ca.crt") if mutual else None,
+        client_auth_required=mutual,
+    )
+
+
+def _scrape_tls(port: int, root: Path, *, mutual: bool) -> str:
+    client_cert = root / "client.crt" if mutual else None
+    return _scrape_text(port, context=tls_client(client_cert))
 
 
 def _prometheus_value(text: str, name: str) -> float:
@@ -249,10 +307,12 @@ def _assert_prometheus_mix(port: int, published_nodes: float) -> None:
 
 
 def test_prometheus_scrape_matches_published_total_nodes():
+    """Only the Prometheus reader. The live client series is served on its HTTP port."""
     host, seed_port = seed_host()
-    reader, port = _prometheus_reader()
+    reader = _prometheus_reader()
     provider = MeterProvider(metric_readers=[reader])
     exporter = OtelExporter(provider)
+    port = _serve(exporter)
     cluster = None
     try:
         cluster = _connect(host, seed_port)
@@ -276,9 +336,10 @@ def test_prometheus_and_otel_report_the_same_total_nodes():
     host, seed_port = seed_host()
     capture = _Capture()
     periodic = PeriodicExportingMetricReader(capture, export_interval_millis=200)
-    prometheus, port = _prometheus_reader()
+    prometheus = _prometheus_reader()
     provider = MeterProvider(metric_readers=[periodic, prometheus])
     exporter = OtelExporter(provider)
+    port = _serve(exporter)
     cluster = None
     try:
         cluster = _connect(host, seed_port)
@@ -307,10 +368,11 @@ def test_periodic_and_prometheus_readers_report_webapp_and_client_metrics():
     host, seed_port = seed_host()
     capture = _SeriesCapture()
     periodic = PeriodicExportingMetricReader(capture, export_interval_millis=200)
-    prometheus, port = _prometheus_reader()
+    prometheus = _prometheus_reader()
     provider = MeterProvider(metric_readers=[periodic, prometheus])
     placed, backlog = _webapp_instruments(provider)
     exporter = OtelExporter(provider)
+    port = _serve(exporter)
     cluster = None
     try:
         cluster = _connect(host, seed_port)
@@ -338,10 +400,11 @@ def test_two_periodic_readers_and_prometheus_report_the_same_metrics():
     first = _SeriesCapture()
     second = _SeriesCapture()
     periodic = PeriodicExportingMetricReader(first, export_interval_millis=200)
-    prometheus, port = _prometheus_reader()
+    prometheus = _prometheus_reader()
     provider = MeterProvider(metric_readers=[periodic, prometheus])
     placed, backlog = _webapp_instruments(provider)
     exporter = OtelExporter(provider)
+    port = _serve(exporter)
     provider.add_metric_reader(
         PeriodicExportingMetricReader(second, export_interval_millis=200)
     )
@@ -365,3 +428,216 @@ def test_two_periodic_readers_and_prometheus_report_the_same_metrics():
             cluster.disable_metrics()
             cluster.close()
         provider.shutdown()
+
+
+def test_webapp_http_server_serves_published_client_metrics():
+    """The webapp serves the reader registry. No periodic reader and no exporter server."""
+    host, seed_port = seed_host()
+    registry = CollectorRegistry()
+    reader = CustomPrometheusMetricReader(registry=registry)
+    provider = MeterProvider(metric_readers=[reader])
+    exporter = OtelExporter(provider)
+    httpd, thread, port = _webapp_http(registry)
+    cluster = None
+    try:
+        cluster = _connect(host, seed_port)
+    except Exception as exc:
+        provider.shutdown()
+        _stop_webapp(httpd, thread)
+        pytest.skip(f"Aerospike seed {host}:{seed_port} unavailable: {exc}")
+
+    try:
+        cluster.add_exporter(exporter)
+        _exercise(cluster)
+        published = _wait_for_publish(exporter)
+        assert _scrape_nodes(port) == published
+        provider.shutdown()
+        assert _PROMETHEUS_NODES not in _scrape_text(port)
+    finally:
+        if cluster is not None:
+            cluster.disable_metrics()
+            cluster.close()
+        provider.shutdown()
+        _stop_webapp(httpd, thread)
+
+
+def test_webapp_http_server_appends_published_client_metrics_to_its_own():
+    """Webapp metrics stay on its registry, and the reader adds the live client series."""
+    host, seed_port = seed_host()
+    registry = CollectorRegistry()
+    Counter("orders_placed", "Orders placed", registry=registry).inc(2)
+    reader = CustomPrometheusMetricReader(registry=registry)
+    provider = MeterProvider(metric_readers=[reader])
+    backlog = provider.get_meter("orders").create_gauge("orders_backlog")
+    exporter = OtelExporter(provider)
+    httpd, thread, port = _webapp_http(registry)
+    cluster = None
+    try:
+        cluster = _connect(host, seed_port)
+    except Exception as exc:
+        provider.shutdown()
+        _stop_webapp(httpd, thread)
+        pytest.skip(f"Aerospike seed {host}:{seed_port} unavailable: {exc}")
+
+    try:
+        backlog.set(4)
+        cluster.add_exporter(exporter)
+        _exercise(cluster)
+        published = _wait_for_publish(exporter)
+        text = _scrape_text(port)
+        assert _prometheus_value(text, "orders_placed_total") == 2
+        assert _prometheus_value(text, "orders_backlog") == 4
+        assert _prometheus_value(text, _PROMETHEUS_NODES) == published
+        provider.shutdown()
+        text = _scrape_text(port)
+        assert _prometheus_value(text, "orders_placed_total") == 2
+        assert _PROMETHEUS_NODES not in text
+        assert "orders_backlog" not in text
+    finally:
+        if cluster is not None:
+            cluster.disable_metrics()
+            cluster.close()
+        provider.shutdown()
+        _stop_webapp(httpd, thread)
+
+
+def _connect_or_skip(provider, httpd, thread, host: str, seed_port: int):
+    try:
+        return _connect(host, seed_port)
+    except Exception as exc:
+        provider.shutdown()
+        _stop_webapp(httpd, thread)
+        pytest.skip(f"Aerospike seed {host}:{seed_port} unavailable: {exc}")
+
+
+@needs_openssl
+def test_webapp_http_server_serves_published_client_metrics_over_tls():
+    """The webapp's TLS server serves the live client series. No client certificate."""
+    host, seed_port = seed_host()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        mint_certificates(root)
+        registry = CollectorRegistry()
+        reader = CustomPrometheusMetricReader(registry=registry)
+        provider = MeterProvider(metric_readers=[reader])
+        exporter = OtelExporter(provider)
+        httpd, thread, port = _webapp_tls(registry, root, mutual=False)
+        cluster = _connect_or_skip(provider, httpd, thread, host, seed_port)
+        try:
+            cluster.add_exporter(exporter)
+            _exercise(cluster)
+            published = _wait_for_publish(exporter)
+            with pytest.raises((URLError, ssl.SSLError, ConnectionResetError)):
+                _scrape_text(port)
+            assert _prometheus_value(_scrape_tls(port, root, mutual=False), _PROMETHEUS_NODES) == published
+            provider.shutdown()
+            assert _PROMETHEUS_NODES not in _scrape_tls(port, root, mutual=False)
+        finally:
+            cluster.disable_metrics()
+            cluster.close()
+            provider.shutdown()
+            _stop_webapp(httpd, thread)
+
+
+@needs_openssl
+def test_webapp_http_server_serves_published_client_metrics_over_mutual_tls():
+    """The webapp's mutual TLS server requires a client certificate for the live series."""
+    host, seed_port = seed_host()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        mint_certificates(root)
+        registry = CollectorRegistry()
+        reader = CustomPrometheusMetricReader(registry=registry)
+        provider = MeterProvider(metric_readers=[reader])
+        exporter = OtelExporter(provider)
+        httpd, thread, port = _webapp_tls(registry, root, mutual=True)
+        cluster = _connect_or_skip(provider, httpd, thread, host, seed_port)
+        try:
+            cluster.add_exporter(exporter)
+            _exercise(cluster)
+            published = _wait_for_publish(exporter)
+            with pytest.raises((URLError, ssl.SSLError)):
+                _scrape_text(port, context=tls_client())
+            text = _scrape_tls(port, root, mutual=True)
+            assert _prometheus_value(text, _PROMETHEUS_NODES) == published
+            provider.shutdown()
+            assert _PROMETHEUS_NODES not in _scrape_tls(port, root, mutual=True)
+        finally:
+            cluster.disable_metrics()
+            cluster.close()
+            provider.shutdown()
+            _stop_webapp(httpd, thread)
+
+
+@needs_openssl
+def test_webapp_http_server_appends_published_client_metrics_over_tls():
+    """Webapp series and the live client series share the webapp's TLS scrape."""
+    host, seed_port = seed_host()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        mint_certificates(root)
+        registry = CollectorRegistry()
+        Counter("orders_placed", "Orders placed", registry=registry).inc(2)
+        reader = CustomPrometheusMetricReader(registry=registry)
+        provider = MeterProvider(metric_readers=[reader])
+        backlog = provider.get_meter("orders").create_gauge("orders_backlog")
+        exporter = OtelExporter(provider)
+        httpd, thread, port = _webapp_tls(registry, root, mutual=False)
+        cluster = _connect_or_skip(provider, httpd, thread, host, seed_port)
+        try:
+            backlog.set(4)
+            cluster.add_exporter(exporter)
+            _exercise(cluster)
+            published = _wait_for_publish(exporter)
+            text = _scrape_tls(port, root, mutual=False)
+            assert _prometheus_value(text, "orders_placed_total") == 2
+            assert _prometheus_value(text, "orders_backlog") == 4
+            assert _prometheus_value(text, _PROMETHEUS_NODES) == published
+            provider.shutdown()
+            text = _scrape_tls(port, root, mutual=False)
+            assert _prometheus_value(text, "orders_placed_total") == 2
+            assert _PROMETHEUS_NODES not in text
+            assert "orders_backlog" not in text
+        finally:
+            cluster.disable_metrics()
+            cluster.close()
+            provider.shutdown()
+            _stop_webapp(httpd, thread)
+
+
+@needs_openssl
+def test_webapp_http_server_appends_published_client_metrics_over_mutual_tls():
+    """Webapp series and the live client series share the webapp's mutual TLS scrape."""
+    host, seed_port = seed_host()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        mint_certificates(root)
+        registry = CollectorRegistry()
+        Counter("orders_placed", "Orders placed", registry=registry).inc(2)
+        reader = CustomPrometheusMetricReader(registry=registry)
+        provider = MeterProvider(metric_readers=[reader])
+        backlog = provider.get_meter("orders").create_gauge("orders_backlog")
+        exporter = OtelExporter(provider)
+        httpd, thread, port = _webapp_tls(registry, root, mutual=True)
+        cluster = _connect_or_skip(provider, httpd, thread, host, seed_port)
+        try:
+            backlog.set(4)
+            cluster.add_exporter(exporter)
+            _exercise(cluster)
+            published = _wait_for_publish(exporter)
+            with pytest.raises((URLError, ssl.SSLError)):
+                _scrape_text(port, context=tls_client())
+            text = _scrape_tls(port, root, mutual=True)
+            assert _prometheus_value(text, "orders_placed_total") == 2
+            assert _prometheus_value(text, "orders_backlog") == 4
+            assert _prometheus_value(text, _PROMETHEUS_NODES) == published
+            provider.shutdown()
+            text = _scrape_tls(port, root, mutual=True)
+            assert _prometheus_value(text, "orders_placed_total") == 2
+            assert _PROMETHEUS_NODES not in text
+            assert "orders_backlog" not in text
+        finally:
+            cluster.disable_metrics()
+            cluster.close()
+            provider.shutdown()
+            _stop_webapp(httpd, thread)

@@ -15,7 +15,8 @@
 :class:`~aerospike_client_telemetry.otel.exporter.OtelExporter` and
 :class:`~aerospike_client_telemetry.otel.exporter.AsyncOtelExporter` register
 instruments on a meter provider the webapp supplies. Importing this package
-does not import OpenTelemetry. The webapp's provider is what imports it.
+does not import OpenTelemetry or ``prometheus_client``. The Prometheus reader
+is :mod:`aerospike_client_telemetry.otel.prometheus_reader`.
 """
 
 from aerospike_client_telemetry.otel.exporter import AsyncOtelExporter, OtelExporter

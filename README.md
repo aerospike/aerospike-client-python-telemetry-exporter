@@ -49,6 +49,21 @@ reader and a Prometheus reader each report both families. A second periodic
 reader, registered later with `add_metric_reader`, collects the same series.
 The Prometheus scrape is that collection from the provider.
 
+The reader is constructed with its conversion settings. Either side can serve
+the registry, in plaintext, TLS, or mutual TLS:
+
+- `exporter.start_http_server` opens the scrape port. `provider.shutdown()`
+  stops that server.
+- The webapp passes its own `CollectorRegistry` into
+  `CustomPrometheusMetricReader` and calls `prometheus_client.start_http_server`
+  with the same certificate fields. `provider.shutdown()` drops the reader
+  series and leaves that server, and the webapp's own Prometheus metrics,
+  running.
+
+Certificate files are supplied by the application. Tests generate them in a
+temporary directory, and `.gitignore` keeps them out of the repository.
+See [docs/prometheus-reader.md](docs/prometheus-reader.md).
+
 The metrics log file stays the client SDK `MetricsWriter`, with `exporter: file`
 and `report_dir`. This package does not ship a writer.
 
@@ -63,16 +78,18 @@ Python 3.11 or newer. The package version is the root `VERSION` file.
 | `opentelemetry-sdk>=1.27.0` | `[otel]` extra. |
 | `opentelemetry-exporter-otlp-proto-grpc>=1.27.0` | `[otel]` extra. |
 | `opentelemetry-exporter-otlp-proto-http>=1.27.0` | `[otel]` extra. |
+| `prometheus-client>=0.20.0` | `[prometheus]` extra. Tested with 0.26.0. |
 | `pytest>=8.0.0`, `pytest-asyncio>=0.21.0`, `testcontainers>=4.0` | `[dev]` extra. |
 
 A higher version that is already installed stays. `[otel]` is only needed when
-those libraries are not already in the environment. Prometheus scrape tests
-install `opentelemetry-exporter-prometheus` separately. It is not a dependency
-of this package.
+those libraries are not already in the environment. `[prometheus]` adds the
+scrape reader. An OTLP-only install does not require `prometheus-client`.
+`opentelemetry-exporter-prometheus` is not a package dependency.
 
 ```bash
 pip install aerospike-client-telemetry-exporter
 pip install 'aerospike-client-telemetry-exporter[otel]'
+pip install 'aerospike-client-telemetry-exporter[otel,prometheus]'
 ```
 
 ## Project
@@ -82,9 +99,10 @@ pip install 'aerospike-client-telemetry-exporter[otel]'
 ├── aerospike_client_telemetry/
 │   ├── common/          # metric catalog and snapshot registry
 │   ├── recording/       # in-memory exporter for tests
-│   └── otel/            # OpenTelemetry exporter; optional import
+│   └── otel/            # OpenTelemetry exporter and optional Prometheus reader
 ├── docs/
 │   ├── metrics.md       # series this package publishes
+│   ├── prometheus-reader.md
 │   └── reference.md     # catalog and snapshot shape for another language
 ├── tests/
 │   ├── unit/
@@ -107,7 +125,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
 python -m pip install -e ../aerospike-client-python-sdk
-python -m pip install -e '.[dev,otel]'
+python -m pip install -e '.[dev,otel,prometheus]'
 python -m compileall -q aerospike_client_telemetry tests
 ```
 

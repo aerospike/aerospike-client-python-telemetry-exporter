@@ -1,121 +1,173 @@
 # Prometheus scrape reader
 
-Status: design, not implemented. Revisit this before writing the reader.
+Status: implemented.
 
-The production exporter does not use `PrometheusMetricReader`. The package
-`opentelemetry-exporter-prometheus` 0.66b1 is Development Status 4, Beta.
-It is not in `pyproject.toml` and not in the `[otel]` extra. Unit and
-integration tests import it, and CI installs it only for those tests.
+`CustomPrometheusMetricReader` converts OpenTelemetry metrics into a
+Prometheus registry. Either the exporter or the webapp starts the listener.
+The beta
+package `opentelemetry-exporter-prometheus` 0.66b1 is a development-time
+comparison target only. It is not a production dependency. The tested pair is
+OpenTelemetry SDK 1.45.1 and `prometheus-client` 0.26.0.
 
-## Decision
+## Boundary
 
-Extend `opentelemetry.sdk.metrics.export.MetricReader`. Do not extend
-`PrometheusMetricReader`. A subclass of the beta class would still ship the
-beta package.
+The reader extends `MetricReader`. It does not extend the beta reader, and it
+does not register instruments or accept an HTTP server. `OtelExporter` still
+publishes snapshots onto the meter provider the application supplies.
+`start_http_server` is the additional method that opens the scrape port.
 
-`collect()` on `MetricReader` is final. The subclass implements
-`_receive_metrics(metrics_data)`. The webapp adds this reader to the same
-`MeterProvider` that already has the periodic OTLP reader and the observable
-instruments `OtelExporter` registered. A scrape calls `collect()`. The SDK
-runs the callbacks already on that provider and passes one `MetricsData`
-batch to `_receive_metrics`. Instruments are not registered a second time.
+When the exporter owns the listener, it validates the bind address and TLS
+material, then calls `prometheus_client.start_http_server` on the reader's
+registry. The application calls `exporter.start_http_server` after the
+provider exists. A webapp that owns the listener starts that server itself.
+This package does not install SIGTERM or SIGINT handlers. The host process
+calls `provider.shutdown()` on graceful shutdown. That calls the reader, which
+unregisters its collector and stops the server the exporter started.
+`MeterProvider(shutdown_on_exit=True)` is only the interpreter-exit fallback.
+SIGKILL does not run that cleanup.
 
-`prometheus_client` is the stable library that writes Prometheus text and can
-serve the scrape port. This package does not import
-`opentelemetry.exporter.prometheus`. This package maps `MetricsData` into
-`prometheus_client` metric families.
+Each process binds its own port. This reader does not combine metrics across
+worker processes. A port already in use raises `OSError` and does not leave a
+thread behind.
 
-## Dependencies
+## Install
 
-The reader subclasses `MetricReader`, so importing it requires
-`opentelemetry-sdk`. That library is already the optional `[otel]` extra. It
-does not become a dependency of every install. The package root stays free of
-OpenTelemetry. A recording-only install does not import the reader.
-
-`prometheus_client` is a separate library from the OpenTelemetry packages. The
-scrape reader needs it. It is not part of the `[otel]` extra today. Add it to
-the extra that installs the reader, and import the reader from its own module
-so the OTLP exporter does not load it.
-
-## Constructor
-
-Match `PrometheusMetricReader` so a later replacement is a class-name and
-import change. The `MeterProvider` line stays the same.
-
-| Argument | Default | Role |
-| --- | --- | --- |
-| `disable_target_info` | `False` | When false, the scrape includes one `target_info` series. Its labels are the OpenTelemetry resource attributes (service name, and the rest of the resource). When true, that series is omitted. Aerospike counters and gauges are unaffected. |
-| `prefix` | `""` | A non-empty value is placed in front of every exported name, with an underscore. It applies to every instrument on the provider, including the webapp's own instruments. |
-| `scope_info_enabled` | `True` | When true, each sample carries `otel_scope_name`, `otel_scope_version`, and `otel_scope_schema_url`. Client instruments use the meter `aerospike.client`. When false, those labels are omitted. |
-| `resource_attribute_filter` | `None` | Keyword-only. With the default, resource attributes stay on `target_info` only. A callback `(name) -> bool` copies each selected resource attribute onto every sample. The label name is sanitized. |
-| `registry` | process-global `REGISTRY` | Keyword-only. The `prometheus_client` registry this reader registers on. |
-
-There is no `port` argument. The webapp starts the server:
-
-```python
-from prometheus_client import start_http_server
-
-start_http_server(port, registry=reader_registry)
+```bash
+pip install 'aerospike-client-telemetry-exporter[otel,prometheus]'
 ```
 
-`reader_registry` is the same object passed to the reader. The OTLP periodic
-reader and `OtelExporter` stay as they are.
+`prometheus-client` is the `[prometheus]` extra. Importing
+`aerospike_client_telemetry.otel` does not import it. The reader module does.
 
-## Process-global registry
+The exporter-owned server does not require application code to import
+`prometheus_client`. A webapp that already serves Prometheus imports
+`prometheus_client` itself and passes its registry to the reader.
 
-`prometheus_client` creates `REGISTRY` when it is imported. The application
-does not set it. Omitting the `registry` argument registers this reader on
-that object. `start_http_server(port)` with no registry argument serves it,
-together with anything else that used the default, including the process
-collectors `prometheus_client` adds there.
+Certificate and key files belong to the application. This package does not
+ship them. Tests mint them with `openssl` in a temporary directory, and
+`.gitignore` ignores `*.pem`, `*.crt`, `*.csr`, `*.key`, and `*.srl`.
 
-If nothing serves `REGISTRY`, the series sit in it and no port returns them.
-`generate_latest(REGISTRY)` can still render the text.
+## Use cases
 
-Passing `registry=None` fails when the reader calls `register`. Passing a new
-`CollectorRegistry()` keeps this reader off the global one. The HTTP server
-must be started with that same object. A server started without it keeps
-serving `REGISTRY`, and this reader's series are absent from the scrape.
+### Exporter-owned scrape server
 
-One process can bind one scrape port. Another worker needs its own port.
+Construct `CustomPrometheusMetricReader` with conversion settings only. The
+exporter opens the port. `provider.shutdown()` stops that server.
 
-## Prometheus notation
+```python
+from aerospike_client_telemetry.otel import OtelExporter
+from aerospike_client_telemetry.otel.prometheus_reader import (
+    CustomPrometheusMetricReader,
+)
 
-Follow the OpenTelemetry Prometheus compatibility rules. Do not invent a
-second naming scheme. [reference.md](reference.md) states the same rules for
-another language.
+prom_reader = CustomPrometheusMetricReader()
+provider = MeterProvider(metric_readers=[periodic_reader, prom_reader])
+exporter = OtelExporter(provider)
+exporter.start_http_server(host="127.0.0.1", port=9464)
+provider.shutdown()
+```
 
-- A metric name uses Prometheus characters only. `.` becomes `_`, any other
-  illegal character becomes `_`, and a leading digit is prefixed with `_`.
-  `aerospike.client.cluster.total_nodes` is
-  `aerospike_client_cluster_total_nodes`.
-- A monotonic counter gains `_total`. A gauge does not.
-  `aerospike.client.cluster.command_count` is
-  `aerospike_client_cluster_command_count_total`.
-- Brace units such as `{connection}` are removed and are not appended to the
-  name. A unit Prometheus does append, such as bytes, follows the
-  compatibility mapping.
-- Label names are sanitized the same way. Labels this exporter already
-  publishes keep their spellings: `cluster`, `client_type`,
-  `client_version`, `app_id`, `client_app_ip`, `server_node_id`,
-  `server_node_address`, `server_node_port`, `ns`, `latency_type`,
-  `latency_unit`, and `le`.
-- Latency stays a cumulative counter with an `le` label, including `+Inf`.
-  It is not rewritten as a Prometheus histogram.
-- Each family has a `TYPE` line and a `HELP` line. Values are the cumulative
-  totals from that scrape, not deltas.
+The default bind address is `127.0.0.1:9464`. `PrometheusConfig` groups the
+host, port, and TLS config. Pass `config=` or `host`, `port`, and
+`tls_config`, one form at a time.
 
-## Replacing it when PrometheusMetricReader is production-ready
+TLS uses a server certificate and key. A scrape client does not present a
+certificate:
 
-The webapp removes this reader from the provider and adds
-`PrometheusMetricReader` with the same constructor arguments. It serves the
-scrape with `prometheus_client.start_http_server` and the same registry.
-`OtelExporter` still owns instrument registration. The OTLP reader stays.
+```python
+from aerospike_client_telemetry.otel.prometheus_reader import TLSConfig
 
-The swap is only that class change when:
+exporter.start_http_server(
+    host="127.0.0.1",
+    port=9464,
+    tls_config=TLSConfig(certfile="server.crt", keyfile="server.key"),
+)
+```
 
-- This reader is only a `MetricReader`. It does not create instruments and it
-  does not wrap `OtelExporter`.
-- The scrape text matches what `PrometheusMetricReader` produces, so
-  dashboards and alerts keep working.
-- The port and registry are chosen by the webapp, outside `OtelExporter`.
+Mutual TLS also requires a client certificate signed by the configured CA:
+
+```python
+exporter.start_http_server(
+    host="127.0.0.1",
+    port=9464,
+    tls_config=TLSConfig(
+        certfile="server.crt",
+        keyfile="server.key",
+        client_cafile="ca.crt",
+        client_auth_required=True,
+    ),
+)
+```
+
+`TLSConfig` fields are `certfile`, `keyfile`, `client_cafile`,
+`client_capath`, `client_auth_required`, `tls_min_version`, and
+`tls_max_version`.
+
+### Webapp-owned scrape server
+
+The webapp keeps its `CollectorRegistry` and calls
+`prometheus_client.start_http_server`. Pass that registry to the reader. Do
+not call `exporter.start_http_server`. A scrape collects the client
+instruments into the webapp registry. `provider.shutdown()` unregisters the
+reader and leaves the webapp server running.
+
+The same TLS and mutual TLS fields are arguments of
+`prometheus_client.start_http_server`: `certfile`, `keyfile`,
+`client_cafile`, `client_capath`, `client_auth_required`, `tls_min_version`,
+and `tls_max_version`.
+
+```python
+from prometheus_client import CollectorRegistry, start_http_server
+
+from aerospike_client_telemetry.otel import OtelExporter
+from aerospike_client_telemetry.otel.prometheus_reader import (
+    CustomPrometheusMetricReader,
+)
+
+registry = CollectorRegistry()
+prom_reader = CustomPrometheusMetricReader(registry=registry)
+provider = MeterProvider(metric_readers=[prom_reader])
+exporter = OtelExporter(provider)
+start_http_server(
+    9464,
+    addr="127.0.0.1",
+    registry=registry,
+    certfile="server.crt",
+    keyfile="server.key",
+)
+provider.shutdown()
+```
+
+Mutual TLS adds `client_cafile="ca.crt"` and `client_auth_required=True` to
+that `start_http_server` call. Omit `certfile` and `keyfile` for plaintext.
+
+### Webapp metrics and client metrics on one scrape
+
+Prometheus metrics the webapp registers on its own registry stay there.
+OpenTelemetry instruments the webapp creates on the same provider are
+collected by the reader into that registry, beside the client series. One
+scrape returns all three. After `provider.shutdown()` the webapp's native
+series remain and the reader series are gone. The webapp server, including
+its TLS or mutual TLS configuration, keeps running.
+
+## Collection
+
+A scrape calls `MetricReader.collect()`. The SDK runs the callbacks already
+registered on the provider and passes one `MetricsData` batch to
+`_receive_metrics`. A periodic OTLP reader collects independently and can
+observe a different snapshot generation.
+
+Counters request cumulative temporality. Monotonic sums become Prometheus
+counters. Cumulative non-monotonic sums become gauges. Gauges stay gauges.
+Histograms become Prometheus histograms. Any other metric type is logged and
+omitted. Names, units, help text, and labels follow the 0.66b1 exporter,
+including its leading-digit sanitizing. Aerospike metric names are not
+hardcoded. Scrapes are serialized so each response is one complete batch.
+
+## Replacing it with the upstream reader
+
+When `PrometheusMetricReader` is production-ready, remove this reader from the
+provider and add the upstream reader. The upstream reader does not provide
+`start_http_server`, so the application then starts and stops the scrape
+endpoint itself. `OtelExporter.export` stays as it is. The swap preserves
+dashboards when the scrape text matches the pinned comparison output.

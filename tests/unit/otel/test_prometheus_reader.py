@@ -12,20 +12,27 @@
 
 """Prometheus is another reader on the webapp's meter provider.
 
-The webapp owns ``opentelemetry-exporter-prometheus`` and starts the scrape
-server. ``OtelExporter`` only registers observable instruments. One test uses
-that reader alone. The other puts it beside a periodic OpenTelemetry reader.
+``OtelExporter`` only registers observable instruments. One test uses only
+``CustomPrometheusMetricReader`` and the exporter's HTTP server. The webapp
+tests serve that reader's registry with the webapp's own HTTP server, in
+plaintext, TLS, and mutual TLS. The other tests put the reader beside a
+periodic OpenTelemetry reader.
 
 The webapp's own instruments share that provider. A periodic reader and a
 Prometheus reader each collect both families. A second periodic reader
-registered later collects the same families.
+registered later collects the same families. Certificates are minted in a
+temporary directory and are not checked in.
 """
 
 from __future__ import annotations
 
 import socket
+import ssl
+import tempfile
 import threading
 import time
+from pathlib import Path
+from urllib.error import URLError
 from urllib.request import urlopen
 
 import pytest
@@ -33,16 +40,20 @@ import pytest
 from aerospike_client_telemetry.otel import OtelExporter
 
 pytest.importorskip("opentelemetry.sdk.metrics")
-pytest.importorskip("opentelemetry.exporter.prometheus")
+pytest.importorskip("prometheus_client")
 
-from opentelemetry.exporter.prometheus import PrometheusMetricReader
+from aerospike_client_telemetry.otel.prometheus_reader import (
+    CollectorRegistry,
+    CustomPrometheusMetricReader,
+)
 from opentelemetry.sdk.metrics import MeterProvider
+from prometheus_client import Counter, start_http_server
+from tests.prometheus_certs import mint_certificates, needs_openssl, tls_client
 from opentelemetry.sdk.metrics.export import (
     MetricExportResult,
     MetricExporter,
     PeriodicExportingMetricReader,
 )
-from prometheus_client import CollectorRegistry, start_http_server
 
 _NODES = "aerospike.client.cluster.total_nodes"
 _PROMETHEUS_NODES = "aerospike_client_cluster_total_nodes"
@@ -99,23 +110,72 @@ def _document(total_nodes: int) -> _Snapshot:
     )
 
 
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+def _prometheus_reader() -> CustomPrometheusMetricReader:
+    return CustomPrometheusMetricReader(registry=CollectorRegistry())
 
 
-def _prometheus_reader() -> tuple[PrometheusMetricReader, int]:
-    registry = CollectorRegistry()
-    reader = PrometheusMetricReader(registry=registry)
-    port = _free_port()
-    start_http_server(port, addr="127.0.0.1", registry=registry)
-    return reader, port
+def _serve(exporter: OtelExporter) -> int:
+    return exporter.start_http_server(host="127.0.0.1", port=0).port
 
 
-def _scrape(port: int) -> str:
-    with urlopen(f"http://127.0.0.1:{port}/metrics", timeout=5) as response:
+def _webapp_http(
+    registry: CollectorRegistry,
+    *,
+    certfile: str | None = None,
+    keyfile: str | None = None,
+    client_cafile: str | None = None,
+    client_auth_required: bool = False,
+):
+    """The webapp's own Prometheus server. This package does not own it."""
+    tls = {}
+    if certfile is not None:
+        tls = {
+            "certfile": certfile,
+            "keyfile": keyfile,
+            "client_cafile": client_cafile,
+            "client_auth_required": client_auth_required,
+            "tls_min_version": ssl.TLSVersion.TLSv1_2,
+            "tls_max_version": ssl.TLSVersion.TLSv1_3,
+        }
+    httpd, thread = start_http_server(0, addr="127.0.0.1", registry=registry, **tls)
+    port = int(httpd.server_address[1])
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                return httpd, thread, port
+        except OSError:
+            time.sleep(0.01)
+    httpd.shutdown()
+    thread.join(1)
+    raise AssertionError("webapp Prometheus server did not accept connections")
+
+
+def _stop_webapp(httpd, thread) -> None:
+    httpd.shutdown()
+    httpd.server_close()
+    thread.join(5)
+
+
+def _scrape(port: int, context: ssl.SSLContext | None = None) -> str:
+    scheme = "https" if context is not None else "http"
+    with urlopen(f"{scheme}://127.0.0.1:{port}/metrics", timeout=5, context=context) as response:
         return response.read().decode()
+
+
+def _webapp_tls(registry: CollectorRegistry, root: Path, *, mutual: bool):
+    return _webapp_http(
+        registry,
+        certfile=str(root / "server.crt"),
+        keyfile=str(root / "server.key"),
+        client_cafile=str(root / "ca.crt") if mutual else None,
+        client_auth_required=mutual,
+    )
+
+
+def _scrape_tls(port: int, root: Path, *, mutual: bool) -> str:
+    client_cert = root / "client.crt" if mutual else None
+    return _scrape(port, context=tls_client(client_cert))
 
 
 def _prometheus_value(text: str, name: str) -> float:
@@ -153,9 +213,11 @@ def _wait_for_nodes(capture: _Capture, total_nodes: float) -> None:
 
 
 def test_a_prometheus_reader_serves_the_published_snapshot():
-    reader, port = _prometheus_reader()
+    """Only the Prometheus reader. Client series are served on its HTTP port."""
+    reader = _prometheus_reader()
     provider = MeterProvider(metric_readers=[reader])
     exporter = OtelExporter(provider)
+    port = _serve(exporter)
     try:
         exporter.export(_document(2))
         assert _prometheus_value(_scrape(port), _PROMETHEUS_NODES) == 2.0
@@ -163,12 +225,170 @@ def test_a_prometheus_reader_serves_the_published_snapshot():
         provider.shutdown()
 
 
+def test_webapp_http_server_serves_client_metrics_from_the_reader():
+    """The webapp serves the reader registry. No periodic reader and no exporter server."""
+    registry = CollectorRegistry()
+    reader = CustomPrometheusMetricReader(registry=registry)
+    provider = MeterProvider(metric_readers=[reader])
+    exporter = OtelExporter(provider)
+    httpd, thread, port = _webapp_http(registry)
+    try:
+        exporter.export(_document(2))
+        assert _prometheus_value(_scrape(port), _PROMETHEUS_NODES) == 2.0
+        provider.shutdown()
+        assert _PROMETHEUS_NODES not in _scrape(port)
+    finally:
+        provider.shutdown()
+        _stop_webapp(httpd, thread)
+
+
+def test_webapp_http_server_appends_client_metrics_to_its_own():
+    """Webapp metrics stay on its registry, and the reader adds the client series."""
+    registry = CollectorRegistry()
+    Counter("orders_placed", "Orders placed", registry=registry).inc(2)
+    reader = CustomPrometheusMetricReader(registry=registry)
+    provider = MeterProvider(metric_readers=[reader])
+    backlog = provider.get_meter("orders").create_gauge("orders_backlog")
+    exporter = OtelExporter(provider)
+    httpd, thread, port = _webapp_http(registry)
+    try:
+        backlog.set(4)
+        exporter.export(_document(3))
+        text = _scrape(port)
+        assert _prometheus_value(text, "orders_placed_total") == 2.0
+        assert _prometheus_value(text, "orders_backlog") == 4.0
+        assert _prometheus_value(text, _PROMETHEUS_NODES) == 3.0
+        provider.shutdown()
+        text = _scrape(port)
+        assert _prometheus_value(text, "orders_placed_total") == 2.0
+        assert _PROMETHEUS_NODES not in text
+        assert "orders_backlog" not in text
+    finally:
+        provider.shutdown()
+        _stop_webapp(httpd, thread)
+
+
+def _reject_plaintext(port: int) -> None:
+    with pytest.raises((URLError, ssl.SSLError, ConnectionResetError)):
+        _scrape(port)
+
+
+@needs_openssl
+def test_webapp_http_server_serves_client_metrics_over_tls():
+    """The webapp's TLS server serves the reader. A client certificate is not required."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        mint_certificates(root)
+        registry = CollectorRegistry()
+        reader = CustomPrometheusMetricReader(registry=registry)
+        provider = MeterProvider(metric_readers=[reader])
+        exporter = OtelExporter(provider)
+        httpd, thread, port = _webapp_tls(registry, root, mutual=False)
+        try:
+            exporter.export(_document(2))
+            _reject_plaintext(port)
+            assert _prometheus_value(_scrape_tls(port, root, mutual=False), _PROMETHEUS_NODES) == 2.0
+            provider.shutdown()
+            assert _PROMETHEUS_NODES not in _scrape_tls(port, root, mutual=False)
+        finally:
+            provider.shutdown()
+            _stop_webapp(httpd, thread)
+
+
+@needs_openssl
+def test_webapp_http_server_serves_client_metrics_over_mutual_tls():
+    """The webapp's mutual TLS server requires a client certificate."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        mint_certificates(root)
+        registry = CollectorRegistry()
+        reader = CustomPrometheusMetricReader(registry=registry)
+        provider = MeterProvider(metric_readers=[reader])
+        exporter = OtelExporter(provider)
+        httpd, thread, port = _webapp_tls(registry, root, mutual=True)
+        try:
+            exporter.export(_document(2))
+            _reject_plaintext(port)
+            with pytest.raises((URLError, ssl.SSLError)):
+                _scrape(port, context=tls_client())
+            assert _prometheus_value(_scrape_tls(port, root, mutual=True), _PROMETHEUS_NODES) == 2.0
+            provider.shutdown()
+            assert _PROMETHEUS_NODES not in _scrape_tls(port, root, mutual=True)
+        finally:
+            provider.shutdown()
+            _stop_webapp(httpd, thread)
+
+
+@needs_openssl
+def test_webapp_http_server_appends_client_metrics_over_tls():
+    """Webapp series and client series share the webapp's TLS scrape."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        mint_certificates(root)
+        registry = CollectorRegistry()
+        Counter("orders_placed", "Orders placed", registry=registry).inc(2)
+        reader = CustomPrometheusMetricReader(registry=registry)
+        provider = MeterProvider(metric_readers=[reader])
+        backlog = provider.get_meter("orders").create_gauge("orders_backlog")
+        exporter = OtelExporter(provider)
+        httpd, thread, port = _webapp_tls(registry, root, mutual=False)
+        try:
+            backlog.set(4)
+            exporter.export(_document(3))
+            _reject_plaintext(port)
+            text = _scrape_tls(port, root, mutual=False)
+            assert _prometheus_value(text, "orders_placed_total") == 2.0
+            assert _prometheus_value(text, "orders_backlog") == 4.0
+            assert _prometheus_value(text, _PROMETHEUS_NODES) == 3.0
+            provider.shutdown()
+            text = _scrape_tls(port, root, mutual=False)
+            assert _prometheus_value(text, "orders_placed_total") == 2.0
+            assert _PROMETHEUS_NODES not in text
+            assert "orders_backlog" not in text
+        finally:
+            provider.shutdown()
+            _stop_webapp(httpd, thread)
+
+
+@needs_openssl
+def test_webapp_http_server_appends_client_metrics_over_mutual_tls():
+    """Webapp series and client series share the webapp's mutual TLS scrape."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        mint_certificates(root)
+        registry = CollectorRegistry()
+        Counter("orders_placed", "Orders placed", registry=registry).inc(2)
+        reader = CustomPrometheusMetricReader(registry=registry)
+        provider = MeterProvider(metric_readers=[reader])
+        backlog = provider.get_meter("orders").create_gauge("orders_backlog")
+        exporter = OtelExporter(provider)
+        httpd, thread, port = _webapp_tls(registry, root, mutual=True)
+        try:
+            backlog.set(4)
+            exporter.export(_document(3))
+            with pytest.raises((URLError, ssl.SSLError)):
+                _scrape(port, context=tls_client())
+            text = _scrape_tls(port, root, mutual=True)
+            assert _prometheus_value(text, "orders_placed_total") == 2.0
+            assert _prometheus_value(text, "orders_backlog") == 4.0
+            assert _prometheus_value(text, _PROMETHEUS_NODES) == 3.0
+            provider.shutdown()
+            text = _scrape_tls(port, root, mutual=True)
+            assert _prometheus_value(text, "orders_placed_total") == 2.0
+            assert _PROMETHEUS_NODES not in text
+            assert "orders_backlog" not in text
+        finally:
+            provider.shutdown()
+            _stop_webapp(httpd, thread)
+
+
 def test_prometheus_and_otel_readers_share_one_meter_provider():
     capture = _Capture()
     periodic = PeriodicExportingMetricReader(capture, export_interval_millis=200)
-    prometheus, port = _prometheus_reader()
+    prometheus = _prometheus_reader()
     provider = MeterProvider(metric_readers=[periodic, prometheus])
     exporter = OtelExporter(provider)
+    port = _serve(exporter)
     try:
         exporter.export(_document(2))
         assert _prometheus_value(_scrape(port), _PROMETHEUS_NODES) == 2.0
@@ -248,10 +468,11 @@ def test_periodic_and_prometheus_readers_report_webapp_and_client_metrics():
     """One provider: webapp instruments and the client exporter, two readers."""
     capture = _SeriesCapture()
     periodic = PeriodicExportingMetricReader(capture, export_interval_millis=200)
-    prometheus, port = _prometheus_reader()
+    prometheus = _prometheus_reader()
     provider = MeterProvider(metric_readers=[periodic, prometheus])
     placed, backlog = _webapp_instruments(provider)
     exporter = OtelExporter(provider)
+    port = _serve(exporter)
     try:
         placed.add(2)
         backlog.set(4)
@@ -267,10 +488,11 @@ def test_two_periodic_readers_and_prometheus_report_the_same_metrics():
     first = _SeriesCapture()
     second = _SeriesCapture()
     periodic = PeriodicExportingMetricReader(first, export_interval_millis=200)
-    prometheus, port = _prometheus_reader()
+    prometheus = _prometheus_reader()
     provider = MeterProvider(metric_readers=[periodic, prometheus])
     placed, backlog = _webapp_instruments(provider)
     exporter = OtelExporter(provider)
+    port = _serve(exporter)
     provider.add_metric_reader(
         PeriodicExportingMetricReader(second, export_interval_millis=200)
     )
