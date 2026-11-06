@@ -140,7 +140,10 @@ exporter.start_http_server(
 
 `TLSConfig` fields are `certfile`, `keyfile`, `client_cafile`,
 `client_capath`, `client_auth_required`, `tls_min_version`, and
-`tls_max_version`.
+`tls_max_version`. Construction checks that material before binding. The
+private key must match the server certificate. Unreadable certificate, key,
+or CA contents are rejected. A client CA file or directory must contain CA
+certificates and no other certificates.
 
 ### Webapp-owned scrape server
 
@@ -203,6 +206,12 @@ Prometheus histograms. Any other metric type is logged and omitted. Names,
 units, help text, and labels follow the 0.66b1 exporter, including its
 leading-digit sanitizing. Aerospike metric names are not hardcoded. Scrapes
 are serialized so each response is one complete batch.
+
+`provider.shutdown()` unregisters the collector and stops an exporter-owned
+server without waiting for a scrape callback. A callback that is still
+running keeps that scrape until it returns. The SDK passes the collect
+timeout into the callback as a hint and does not interrupt the callback when
+the hint expires. `export()` does not wait for the callback either.
 
 ## Replacing it with the upstream reader
 

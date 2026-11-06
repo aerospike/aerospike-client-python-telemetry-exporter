@@ -14,8 +14,8 @@
 
 import pytest
 
-from aerospike_client_telemetry.common import CATALOG
 from aerospike_client_telemetry.otel import OtelExporter
+from tests.expected_metrics import EXPECTED_METRIC_NAMES
 from tests.fake_provider import RecordingProvider
 
 
@@ -31,5 +31,5 @@ def test_instruments_are_registered_without_shutting_down_the_provider():
     assert exporter.meter_provider is provider
     assert provider.meter_name == "aerospike.client"
     registered = set(provider.meter.counters) | set(provider.meter.gauges)
-    assert registered == {descriptor.name for descriptor in CATALOG}
+    assert registered == EXPECTED_METRIC_NAMES
     assert provider.shutdowns == 0

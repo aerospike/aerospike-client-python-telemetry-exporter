@@ -35,6 +35,10 @@ Register the exporter in `CUSTOM` mode with `add_exporter`, then
 `provider.shutdown()`. The exporter has no `close()`. The webapp owns the
 provider, and shutting it down drops the observable callbacks.
 
+Two exporters built with that same provider share one registry and one set
+of instruments. Each client remains its own document, and every reader on
+the provider collects both. A second registry on that provider is rejected.
+
 `export()` stores the latest snapshot and returns. A failed OTLP send does not
 raise from `export()`. If a newer `aerospike-sdk` or OpenTelemetry release
 changes a call this package makes, `export()` lets that exception propagate.
@@ -57,16 +61,19 @@ argument. Either side can serve the registry, in plaintext, TLS, or mutual
 TLS:
 
 - `exporter.start_http_server` opens the scrape port. `provider.shutdown()`
-  stops that server.
+  stops that server. It does not wait for a scrape callback that is still
+  running, and it does not cancel that callback.
 - The webapp passes its own `CollectorRegistry` into
   `CustomPrometheusMetricReader` and calls `prometheus_client.start_http_server`
   with the same certificate fields. `provider.shutdown()` drops the reader
   series and leaves that server, and the webapp's own Prometheus metrics,
   running.
 
-Certificate files are supplied by the application. Tests generate them in a
-temporary directory, and `.gitignore` keeps them out of the repository.
-See [docs/prometheus-reader.md](docs/prometheus-reader.md).
+Certificate files are supplied by the application. Construction checks them
+before binding: the private key must match the server certificate, and a
+client CA file or directory must contain CA certificates only. Tests generate
+them in a temporary directory, and `.gitignore` keeps them out of the
+repository. See [docs/prometheus-reader.md](docs/prometheus-reader.md).
 
 The metrics log file stays the client SDK `MetricsWriter`, with `exporter: file`
 and `report_dir`. This package does not ship a writer.

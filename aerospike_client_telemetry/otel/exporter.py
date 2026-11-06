@@ -22,16 +22,22 @@ network I/O and does not retain the snapshot.
 
 The webapp builds the meter provider, including its resource, OTLP exporter,
 and periodic reader, and passes that provider in. This package does not
-create that provider and does not shut it down. ``start_http_server`` is the
-exception: it serves the provider's Prometheus reader over plaintext, TLS, or
-mutual TLS, and ``provider.shutdown()`` stops that server. A webapp that
-serves the reader's registry itself does not call ``start_http_server``.
+create that provider and does not shut it down. Two exporters constructed
+with that same provider share one registry and register the catalog once.
+The OpenTelemetry meter keeps the first callbacks for a name, so a second
+registration would leave the second exporter's documents uncollected. Each
+client stays a separate document. ``start_http_server`` is the exception
+that serves the provider's Prometheus reader over plaintext, TLS, or mutual
+TLS, and ``provider.shutdown()`` stops that server. A webapp that serves
+the reader's registry itself does not call ``start_http_server``.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+import threading
 from typing import Any, Optional
+import weakref
 
 from aerospike_client_telemetry.common import (
     CATALOG,
@@ -44,6 +50,11 @@ from aerospike_client_telemetry.common.catalog import MetricDescriptor
 
 _METER_NAME = "aerospike.client"
 _UNSET = object()
+# One provider has one meter. The meter keeps the first callbacks registered
+# for a name, so every exporter on that provider must publish into the
+# registry those callbacks already close over.
+_provider_registries: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+_provider_registries_lock = threading.Lock()
 
 
 def _client_key(document: Mapping[str, Any]) -> str:
@@ -135,9 +146,20 @@ class _OtelExportState:
         if meter_provider is None:
             raise TypeError("meter_provider is required")
         self.meter_provider = meter_provider
-        self.registry = registry if registry is not None else ClientSnapshotRegistry()
         self._prometheus_http_server: Any = None
-        _register_instruments(self.meter_provider.get_meter(_METER_NAME), self.registry)
+        register = False
+        with _provider_registries_lock:
+            current = _provider_registries.get(meter_provider)
+            if current is None:
+                self.registry = registry if registry is not None else ClientSnapshotRegistry()
+                _provider_registries[meter_provider] = self.registry
+                register = True
+            elif registry is None or registry is current:
+                self.registry = current
+            else:
+                raise ValueError("this MeterProvider already has an exporter registry")
+        if register:
+            _register_instruments(self.meter_provider.get_meter(_METER_NAME), self.registry)
 
     def start_http_server(
         self,

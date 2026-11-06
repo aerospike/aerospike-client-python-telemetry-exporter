@@ -20,8 +20,10 @@ import multiprocessing
 import signal
 import socket
 import ssl
+import subprocess
 import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.error import URLError
@@ -242,6 +244,113 @@ def test_invalid_prometheus_configuration_does_not_bind():
         )
 
 
+@needs_openssl
+def test_invalid_or_mismatched_tls_material_does_not_bind():
+    """Bad certificate, key, or CA contents fail before the port is bound."""
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        mint_certificates(root)
+        _openssl_req(root, "other.key")
+        (root / "garbage.crt").write_text("not a certificate\n")
+        (root / "garbage.key").write_text("not a key\n")
+        (root / "empty-cas").mkdir()
+        mixed = root / "mixed.crt"
+        mixed.write_text((root / "ca.crt").read_text() + (root / "server.crt").read_text())
+        server_crt = str(root / "server.crt")
+        server_key = str(root / "server.key")
+        PrometheusHTTPServer(
+            CollectorRegistry(),
+            host="127.0.0.1",
+            port=0,
+            tls_config=TLSConfig(
+                certfile=server_crt,
+                keyfile=server_key,
+                client_cafile=str(root / "ca.crt"),
+                client_auth_required=True,
+            ),
+        )
+        rejected = (
+            (
+                TLSConfig(certfile=str(root / "garbage.crt"), keyfile=server_key),
+                "cannot load server certificate or key",
+            ),
+            (
+                TLSConfig(certfile=server_crt, keyfile=str(root / "garbage.key")),
+                "cannot load server certificate or key",
+            ),
+            (
+                TLSConfig(certfile=server_crt, keyfile=str(root / "other.key")),
+                "cannot load server certificate or key",
+            ),
+            (
+                TLSConfig(
+                    certfile=server_crt,
+                    keyfile=server_key,
+                    client_cafile=str(root / "garbage.crt"),
+                    client_auth_required=True,
+                ),
+                "cannot load client CA",
+            ),
+            (
+                TLSConfig(
+                    certfile=server_crt,
+                    keyfile=server_key,
+                    client_cafile=server_crt,
+                    client_auth_required=True,
+                ),
+                "does not contain a CA certificate",
+            ),
+            (
+                TLSConfig(
+                    certfile=server_crt,
+                    keyfile=server_key,
+                    client_cafile=str(mixed),
+                    client_auth_required=True,
+                ),
+                "not a CA",
+            ),
+            (
+                TLSConfig(
+                    certfile=server_crt,
+                    keyfile=server_key,
+                    client_capath=str(root / "empty-cas"),
+                    client_auth_required=True,
+                ),
+                "does not contain a CA certificate",
+            ),
+        )
+        for tls_config, message in rejected:
+            with pytest.raises(ValueError, match=message):
+                PrometheusHTTPServer(
+                    CollectorRegistry(),
+                    host="127.0.0.1",
+                    port=0,
+                    tls_config=tls_config,
+                )
+
+
+def _openssl_req(directory: Path, key_name: str) -> None:
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            key_name,
+            "-out",
+            "other.csr",
+            "-subj",
+            "/CN=other",
+        ],
+        cwd=directory,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def test_concurrent_scrapes_and_shutdown_are_safe():
     reader, server, provider, _exporter = _pair()
     port = server.port
@@ -325,6 +434,68 @@ def test_callback_failure_and_timeout_do_not_block_snapshot_export():
         reader.collect(timeout_millis=25)
         assert seen["timeout"] <= 25
     finally:
+        provider.shutdown()
+
+
+def test_a_slow_callback_runs_to_completion():
+    """A callback longer than the collect hint is not interrupted."""
+    seen = {}
+
+    def slow(options):
+        seen["timeout"] = options.timeout_millis
+        time.sleep(0.2)
+        return [Observation(1)]
+
+    reader = CustomPrometheusMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+    provider.get_meter("slow").create_observable_gauge("slow", callbacks=[slow])
+    try:
+        began = time.monotonic()
+        reader.collect(timeout_millis=50)
+        assert time.monotonic() - began >= 0.2
+        assert seen["timeout"] <= 50
+        assert _value(generate_latest(reader.registry).decode(), "slow") == 1
+    finally:
+        provider.shutdown()
+
+
+def test_shutdown_returns_while_a_scrape_callback_is_blocked():
+    """A callback blocked forever does not keep shutdown waiting."""
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def blocked(options):
+        started.set()
+        release.wait()
+        finished.set()
+        return [Observation(1)]
+
+    reader = CustomPrometheusMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+    provider.get_meter("hold").create_observable_gauge("hold", callbacks=[blocked])
+    exporter = OtelExporter(provider)
+    server = exporter.start_http_server(host="127.0.0.1", port=0)
+    port = server.port
+
+    def scrape() -> None:
+        try:
+            _scrape(port)
+        except Exception:
+            pass
+
+    worker = threading.Thread(target=scrape, daemon=True)
+    worker.start()
+    assert started.wait(2)
+    try:
+        began = time.monotonic()
+        reader.shutdown(timeout_millis=1_000)
+        assert time.monotonic() - began < 2
+        assert not finished.is_set()
+        assert _closed(port)
+    finally:
+        release.set()
+        worker.join(2)
         provider.shutdown()
 
 

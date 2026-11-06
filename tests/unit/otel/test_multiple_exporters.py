@@ -12,6 +12,9 @@
 
 """Two OTel exporters, and one exporter receiving two publishes."""
 
+import pytest
+
+from aerospike_client_telemetry.common import ClientSnapshotRegistry
 from aerospike_client_telemetry.otel import OtelExporter
 from tests.fake_provider import RecordingProvider
 
@@ -53,6 +56,71 @@ def test_two_exporters_keep_separate_registries():
     assert billing.registry.current(_KEY) is document
     assert orders.registry.client_keys() == (_KEY,)
     assert billing.registry.client_keys() == (_KEY,)
+
+
+def _client(app_id: str, command_count: int) -> dict:
+    return {
+        "client_type": "python-sdk",
+        "client_version": "1.0.0",
+        "cluster_name": "local",
+        "app_id": app_id,
+        "operational_metrics_enabled": True,
+        "command_count": command_count,
+    }
+
+
+def test_two_exporters_sharing_one_meter_provider_publish_both_clients():
+    """The meter keeps the first callbacks, so both exporters use one registry."""
+    provider = RecordingProvider()
+    orders = OtelExporter(provider)
+    callback = provider.meter.counters["aerospike.client.cluster.command_count"][0]
+    billing = OtelExporter(provider)
+
+    assert orders.registry is billing.registry
+    assert orders.meter_provider is billing.meter_provider
+    assert provider.meter.counters["aerospike.client.cluster.command_count"] == [callback]
+
+    orders.export(_Snapshot(_client("orders", 2)))
+    billing.export(_Snapshot(_client("billing", 5)))
+    seen = {
+        observation.attributes["app_id"]: observation.value for observation in callback(None)
+    }
+    assert seen == {"orders": 2, "billing": 5}
+
+
+def test_a_second_registry_on_the_same_meter_provider_is_rejected():
+    provider = RecordingProvider()
+    OtelExporter(provider)
+    with pytest.raises(ValueError, match="already has an exporter registry"):
+        OtelExporter(provider, registry=ClientSnapshotRegistry())
+
+
+def test_two_exporters_on_one_sdk_provider_are_both_collected():
+    pytest.importorskip("opentelemetry.sdk.metrics")
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+    try:
+        orders = OtelExporter(provider)
+        billing = OtelExporter(provider)
+        assert orders.registry is billing.registry
+        orders.export(_Snapshot(_client("orders", 2)))
+        billing.export(_Snapshot(_client("billing", 5)))
+        data = reader.get_metrics_data()
+    finally:
+        provider.shutdown()
+
+    seen = {}
+    for resource in data.resource_metrics:
+        for scope in resource.scope_metrics:
+            for metric in scope.metrics:
+                if metric.name != "aerospike.client.cluster.command_count":
+                    continue
+                for point in metric.data.data_points:
+                    seen[point.attributes["app_id"]] = point.value
+    assert seen == {"orders": 2, "billing": 5}
 
 
 def test_two_publishes_on_one_exporter_keep_the_latest_document():

@@ -42,8 +42,9 @@ from aerospike_sdk.metrics import MetricsExporterType, MetricsPolicy
 from aerospike_sdk.policy.system_settings import MetricsSettings, SystemSettings
 from aerospike_sdk.sync import ClusterDefinition
 
-from aerospike_client_telemetry.common import CATALOG, client_app_ip
+from aerospike_client_telemetry.common import client_app_ip
 from aerospike_client_telemetry.otel import OtelExporter
+from tests.expected_metrics import EXPECTED_METRIC_NAMES
 from tests.integration.compose_group import container_name, labels, project_network
 from tests.integration.support import CALLBACK_TIMEOUT_SECONDS, namespace, seed_host
 
@@ -390,16 +391,16 @@ def _print_coverage(series: list[dict], document: dict, tally: _Tally, namespace
     by_name: dict[str, list[dict]] = {}
     for sample in series:
         by_name.setdefault(sample["metric"].get("__name__", ""), []).append(sample)
-    catalog_names = {_prometheus_name(descriptor.name) for descriptor in CATALOG}
-    received = set(by_name) & catalog_names
-    missing = sorted(catalog_names - received)
+    expected_names = {_prometheus_name(name) for name in EXPECTED_METRIC_NAMES}
+    received = set(by_name) & expected_names
+    missing = sorted(expected_names - received)
     read_seen = _latency_count(document, "read", namespace_name)
     write_seen = _latency_count(document, "write", namespace_name)
     batch_seen = _latency_count(document, "batch", namespace_name)
     query_seen = _latency_count(document, "query", namespace_name)
     lines = [
         "tiers: operational=True usage=True",
-        f"full catalog: {len(catalog_names)} metrics",
+        f"expected: {len(expected_names)} metrics",
         f"received: {len(received)} names, {len(series)} series",
         "",
         "calls against counters",
@@ -573,8 +574,8 @@ def test_webapp_pushes_a_client_metric_to_the_collector(otel_collector, grpc):
         assert read_bucket["metric"]["latency_unit"] in {"milliseconds", "microseconds"}
 
         received = {sample["metric"].get("__name__") for sample in series}
-        catalog_names = {_prometheus_name(descriptor.name) for descriptor in CATALOG}
-        missing = catalog_names - received
+        expected_names = {_prometheus_name(name) for name in EXPECTED_METRIC_NAMES}
+        missing = expected_names - received
         # These stay 0 until native fills them. An older SDK omits the fields,
         # so the callback publishes nothing and Prometheus has no series.
         pending = set()

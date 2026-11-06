@@ -274,6 +274,13 @@ def _validate_tls(tls: TLSConfig | None) -> None:
             context.load_verify_locations(tls.client_cafile, tls.client_capath)
         except OSError as exc:
             raise ValueError(f"cannot load client CA certificates: {exc}") from exc
+        loaded = context.cert_store_stats()
+        certificates = loaded["x509"]
+        authorities = loaded["x509_ca"]
+        if authorities < 1:
+            raise ValueError("client CA material does not contain a CA certificate")
+        if certificates != authorities:
+            raise ValueError("client CA material contains a certificate that is not a CA")
     try:
         context.load_cert_chain(tls.certfile, tls.keyfile)
     except OSError as exc:
@@ -290,6 +297,8 @@ class PrometheusHTTPServer:
     """HTTP listener for one Prometheus registry.
 
     Construction validates the address and TLS material and does not bind.
+    The server certificate and private key must match. Client CA material
+    must contain CA certificates only.
     ``start()`` calls ``prometheus_client.start_http_server``. ``shutdown()``
     closes the socket and joins the server thread. Both calls are safe to
     repeat. A port that is already taken raises ``OSError`` and leaves no
@@ -424,6 +433,7 @@ class _Collector:
     def __init__(
         self,
         lock: threading.RLock,
+        scrape_lock: threading.Lock,
         callback: Callable[[], None],
         disable_target_info: bool,
         prefix: str,
@@ -431,6 +441,7 @@ class _Collector:
         resource_attribute_filter: Callable[[str], bool] | None,
     ) -> None:
         self._lock = lock
+        self._scrape_lock = scrape_lock
         self._callback = callback
         self._metrics_data: MetricsData | None = None
         self._closed = False
@@ -447,11 +458,18 @@ class _Collector:
         self._metrics_data = None
 
     def collect(self) -> Iterable[PrometheusMetric]:
-        with self._lock:
-            if self._closed:
-                return []
+        # The callback runs without the state lock. Shutdown can unregister
+        # this collector and stop the server while a callback is still blocked.
+        # The scrape lock only keeps one scrape from overlapping another.
+        with self._scrape_lock:
+            with self._lock:
+                if self._closed:
+                    return []
             self._callback()
-            metrics_data = self._metrics_data
+            with self._lock:
+                if self._closed:
+                    return []
+                metrics_data = self._metrics_data
             if metrics_data is None:
                 return []
             return list(self._translate(metrics_data))
@@ -651,11 +669,13 @@ class CustomPrometheusMetricReader(MetricReader):
         if registry is None:
             registry = CollectorRegistry()
         self._lock = threading.RLock()
+        self._scrape_lock = threading.Lock()
         self._shutdown_cv = threading.Condition(self._lock)
         self._shutdown_started = False
         self._shutdown_done = False
         self._collector = _Collector(
             self._lock,
+            self._scrape_lock,
             self.collect,
             disable_target_info,
             prefix,
@@ -701,6 +721,10 @@ class CustomPrometheusMetricReader(MetricReader):
 
         The collector is removed even when HTTP shutdown fails. A second or
         overlapping call waits for the first attempt and then returns.
+        Shutdown does not wait for a scrape callback and does not cancel one.
+        A callback that blocks keeps that scrape until it returns. The SDK
+        passes ``timeout_millis`` into the callback as a hint. It does not
+        interrupt the callback when that hint expires.
         """
         with self._lock:
             if self._shutdown_done:
