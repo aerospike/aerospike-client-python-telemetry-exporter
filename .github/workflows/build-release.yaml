@@ -1,0 +1,179 @@
+name: Build and release
+
+permissions:
+  id-token: write
+  contents: read
+  actions: write
+
+on:
+  workflow_call:
+    inputs:
+      promote-to-test:
+        description: >-
+          Promote the release bundle to TEST after DEV. A later release
+          workflow passes true. Dev-channel builds pass false and stop at DEV.
+        required: false
+        type: boolean
+        default: true
+      dry_run:
+        description: Keep deploy and bundle creation in dry-run mode.
+        required: false
+        type: boolean
+        default: true
+      version-override:
+        description: |
+          Version stamped ephemerally into the build workspace instead of the
+          committed VERSION file (dev-channel builds, e.g.
+          "0.0.2-dev.123"). Empty means build the committed version as-is.
+        required: false
+        type: string
+        default: ''
+
+env:
+  SHARED_WORKFLOWS_REF: 49381314f7afd64afb580b77bab8ac263040c27e # PyPI metadata SIGPIPE fix (post-v5.0.0)
+
+jobs:
+  extract-version:
+    runs-on: ${{ vars.BUILD_CONTAINER_DISTRO_VERSION || 'ubuntu-22.04' }}
+    outputs:
+      version: ${{ inputs.version-override != '' && inputs.version-override || steps.extract.outputs.release-version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+      - name: Extract version
+        id: extract
+        uses: ./.github/actions/get-version
+
+  build-packages:
+    name: build (${{ matrix.name }})
+    needs: extract-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: wheel
+            runs-on: ubuntu-22.04
+            package-kind: wheel
+          - name: sdist
+            runs-on: ubuntu-22.04
+            package-kind: sdist
+    uses: aerospike/shared-workflows/.github/workflows/reusable_execute-build.yaml@49381314f7afd64afb580b77bab8ac263040c27e # PyPI metadata SIGPIPE fix (post-v5.0.0)
+    with:
+      gh-workflows-ref: 49381314f7afd64afb580b77bab8ac263040c27e # PyPI metadata SIGPIPE fix (post-v5.0.0)
+      runs-on: ${{ matrix.runs-on }}
+      jf-project: ${{ vars.JFROG_PROJECT || 'database' }}
+      jf-build-name: aerospike-client-telemetry-exporter
+      jf-build-id: ${{ github.run_number }}-buildinfo-${{ matrix.name }}
+      gh-checkout-path: shared-workflows
+      gh-source-path: aerospike-client-python-telemetry-exporter
+      working-directory: aerospike-client-python-telemetry-exporter
+      setup-python: true
+      python-version: "3.13"
+      job-name: ${{ matrix.name }}
+      build-script: |
+        set -euo pipefail
+
+        # Dev-channel builds stamp an ephemeral version; never committed.
+        if [[ -n "${VERSION_OVERRIDE:-}" ]]; then
+          python .github/scripts/stamp_version.py "$VERSION_OVERRIDE"
+        fi
+
+        python -m pip install --upgrade pip build
+
+        rm -rf dist
+        mkdir -p dist
+
+        if [[ "$PACKAGE_KIND" == "sdist" ]]; then
+          python -m build --sdist --outdir dist
+        else
+          python -m build --wheel --outdir dist
+        fi
+      build-env: PACKAGE_KIND=${{ matrix.package-kind }};VERSION_OVERRIDE=${{ inputs.version-override }}
+      gh-artifact-directory: dist
+      gh-artifact-name: build-artifacts-${{ matrix.name }}
+      gh-retention-days: 1
+      publish-build-info: true
+      dry-run: ${{ inputs.dry_run }}
+      oidc-provider-name: ${{ vars.OIDC_PROVIDER_NAME || 'gh-aerospike' }}
+      oidc-audience: ${{ vars.OIDC_AUDIENCE || 'aerospike' }}
+
+  collect-artifacts:
+    needs: build-packages
+    runs-on: ${{ vars.BUILD_CONTAINER_DISTRO_VERSION || 'ubuntu-22.04' }}
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - name: Checkout shared-workflows actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: aerospike/shared-workflows
+          ref: ${{ env.SHARED_WORKFLOWS_REF }}
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+      - name: Collect build artifacts
+        uses: ./.github/actions/collect-build-artifacts
+
+  deploy-artifacts:
+    needs: [extract-version, collect-artifacts]
+    uses: aerospike/shared-workflows/.github/workflows/reusable_deploy-artifacts.yaml@49381314f7afd64afb580b77bab8ac263040c27e # PyPI metadata SIGPIPE fix (post-v5.0.0)
+    with:
+      gh-workflows-ref: 49381314f7afd64afb580b77bab8ac263040c27e # PyPI metadata SIGPIPE fix (post-v5.0.0)
+      runs-on: ${{ vars.BUILD_CONTAINER_DISTRO_VERSION || 'ubuntu-22.04' }}
+      jf-project: ${{ vars.JFROG_PROJECT || 'database' }}
+      jf-build-name: aerospike-client-telemetry-exporter
+      jf-metadata-build-id: ${{ github.run_number }}-buildinfo
+      jf-build-id: ${{ github.run_number }}
+      gh-artifact-name: build-artifacts
+      # Pure-Python wheels produce no Maven metadata; explicit per the v4.0.0 upgrade table.
+      gh-upload-bundle-metadata: false
+      version: ${{ needs.extract-version.outputs.version }}
+      gh-retention-days: 1
+      oidc-provider-name: ${{ vars.OIDC_PROVIDER_NAME || 'gh-aerospike' }}
+      oidc-audience: ${{ vars.OIDC_AUDIENCE || 'aerospike' }}
+      dry-run: ${{ inputs.dry_run }}
+
+  create-release-bundle:
+    needs: [extract-version, deploy-artifacts]
+    uses: aerospike/shared-workflows/.github/workflows/reusable_create-release-bundle.yaml@49381314f7afd64afb580b77bab8ac263040c27e # PyPI metadata SIGPIPE fix (post-v5.0.0)
+    with:
+      gh-workflows-ref: 49381314f7afd64afb580b77bab8ac263040c27e # PyPI metadata SIGPIPE fix (post-v5.0.0)
+      runs-on: ${{ vars.BUILD_CONTAINER_DISTRO_VERSION || 'ubuntu-22.04' }}
+      jf-project: ${{ vars.JFROG_PROJECT || 'database' }}
+      jf-build-names: aerospike-client-telemetry-exporter:${{ github.run_number }}
+      jf-bundle-name: aerospike-client-telemetry-exporter
+      version: ${{ needs.extract-version.outputs.version }}
+      oidc-provider-name: ${{ vars.OIDC_PROVIDER_NAME || 'gh-aerospike' }}
+      oidc-audience: ${{ vars.OIDC_AUDIENCE || 'aerospike' }}
+      dry-run: ${{ inputs.dry_run }}
+
+  promote-release-bundle-dev:
+    needs: [extract-version, create-release-bundle]
+    if: ${{ inputs.dry_run == false }}
+    runs-on: ${{ vars.BUILD_CONTAINER_DISTRO_VERSION || 'ubuntu-22.04' }}
+    steps:
+      - name: Setup JFrog CLI
+        uses: step-security/setup-jfrog-cli@3054b554c0fb4915b3d58847fb7730c593dbb934 # v5.0.0
+        env:
+          JF_URL: https://artifact.aerospike.io
+          JF_PROJECT: ${{ vars.JFROG_PROJECT || 'database' }}
+        with:
+          oidc-provider-name: ${{ vars.OIDC_PROVIDER_NAME || 'gh-aerospike' }}
+          oidc-audience: ${{ vars.OIDC_AUDIENCE || 'aerospike' }}
+      - name: Promote release bundle to DEV
+        uses: aerospike/shared-workflows/.github/actions/promote-release-bundle@49381314f7afd64afb580b77bab8ac263040c27e # PyPI metadata SIGPIPE fix (post-v5.0.0)
+        with:
+          bundle-name: aerospike-client-telemetry-exporter
+          version: ${{ needs.extract-version.outputs.version }}
+          environment: DEV
+          jf-project: ${{ vars.JFROG_PROJECT || 'database' }}
+      - name: Promote release bundle to TEST
+        if: ${{ inputs.promote-to-test }}
+        uses: aerospike/shared-workflows/.github/actions/promote-release-bundle@49381314f7afd64afb580b77bab8ac263040c27e # PyPI metadata SIGPIPE fix (post-v5.0.0)
+        with:
+          bundle-name: aerospike-client-telemetry-exporter
+          version: ${{ needs.extract-version.outputs.version }}
+          environment: TEST
+          jf-project: ${{ vars.JFROG_PROJECT || 'database' }}
