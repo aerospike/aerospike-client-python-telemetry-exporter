@@ -33,7 +33,13 @@ from aerospike_sdk.sync import ClusterDefinition
 from aerospike_client_telemetry.common import client_app_ip, series_attributes
 from aerospike_client_telemetry.otel import OtelExporter
 from tests.fake_provider import RecordingProvider
-from tests.integration.support import CALLBACK_TIMEOUT_SECONDS, namespace, seed_host
+from tests.integration.support import (
+    CALLBACK_TIMEOUT_SECONDS,
+    active_node_count,
+    command_count,
+    namespace,
+    seed_host,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -132,7 +138,7 @@ def _document_for(exporter: OtelExporter, cluster_name: str, minimum: int = 1) -
         for key in exporter.registry.client_keys():
             document = exporter.registry.current(key)
             if document and document.get("cluster_name") == cluster_name:
-                count = document["command_count"]
+                count = command_count(document)
                 if count >= minimum:
                     return document
         time.sleep(0.05)
@@ -170,12 +176,12 @@ def test_orders_webapp_exports_client_telemetry():
         assert "client_app_ip" not in series_attributes(document)
         assert document["operational_metrics_enabled"] is True
         assert document["usage_metrics_enabled"] is True
-        assert document["usage"]["blocking"] >= 1
-        assert document["usage"]["shape_point"] >= 1
-        assert document["command_count"] >= 1
-        assert document["total_nodes"] >= 1
+        assert document["usage"]["feature.api.blocking"] >= 1
+        assert document["usage"]["feature.shape.point"] >= 1
+        assert command_count(document) >= 1
+        assert active_node_count(document) >= 1
         assert document["nodes"]
-        assert app.exporter.meter_provider.meter_name == "aerospike.client"
+        assert app.exporter.meter_provider.meter_name == "aerospike_client"
     finally:
         app.shutdown()
 
@@ -200,20 +206,20 @@ def test_one_exporter_keeps_two_clusters_independent(aerospike_server_two):
         assert first["app_id"] == second["app_id"] == "orders-service"
         assert first["cluster_name"] == "telemetry-it"
         assert second["cluster_name"] == "telemetry-it-two"
-        assert first["command_count"] >= 1
-        held = second["command_count"]
+        assert command_count(first) >= 1
+        held = command_count(second)
         assert held >= 2
         _place(clusters[0], namespace_name, 4)
         moved = _document_for(exporter, "telemetry-it")
         deadline = time.monotonic() + CALLBACK_TIMEOUT_SECONDS
-        while moved["command_count"] <= first["command_count"]:
+        while command_count(moved) <= command_count(first):
             if time.monotonic() > deadline:
                 break
             time.sleep(0.05)
             moved = _document_for(exporter, "telemetry-it")
-        assert moved["command_count"] > first["command_count"]
+        assert command_count(moved) > command_count(first)
         still = _document_for(exporter, "telemetry-it-two")
-        assert still["command_count"] == held
+        assert command_count(still) == held
     finally:
         for cluster in clusters:
             cluster.disable_metrics()

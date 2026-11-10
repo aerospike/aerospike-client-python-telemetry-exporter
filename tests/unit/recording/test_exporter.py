@@ -39,16 +39,17 @@ def _document():
         "latency_unit": "milliseconds",
         "latency_columns": 7,
         "latency_shift": 1,
-        "total_nodes": 1,
-        "invalid_node_count": 0,
-        "command_count": 4,
-        "command_retries": 1,
+        "cluster": {
+            "nodes": {"active": 1, "invalid": 0},
+            "command_count": 4,
+            "command_retries": 1,
+        },
         "nodes": [
             {
-                "node_name": "BB9",
-                "node_address": "127.0.0.1",
-                "node_port": 3100,
-                "namespaces": [{"namespace": "test", "errors": 0}],
+                "name": "BB9",
+                "address": "127.0.0.1",
+                "port": 3100,
+                "namespaces": [{"name": "test", "errors": 0}],
             }
         ],
         "nodes_departed": [],
@@ -117,8 +118,8 @@ def test_translate_snapshot_reads_without_mutating():
     assert record.labels["cluster"] == "local"
     assert record.labels["owner"] == "platform"
     assert "cluster_name" not in record.labels
-    document["nodes"].append({"node_name": "later"})
-    document["command_count"] = 99
+    document["nodes"].append({"name": "later"})
+    document["cluster"]["command_count"] = 99
     assert record.node_names == ("BB9",)
     assert record.command_count == 4
 

@@ -65,7 +65,7 @@ def _client(app_id: str, command_count: int) -> dict:
         "cluster_name": "local",
         "app_id": app_id,
         "operational_metrics_enabled": True,
-        "command_count": command_count,
+        "cluster": {"command_count": command_count},
     }
 
 
@@ -73,12 +73,12 @@ def test_two_exporters_sharing_one_meter_provider_publish_both_clients():
     """The meter keeps the first callbacks, so both exporters use one registry."""
     provider = RecordingProvider()
     orders = OtelExporter(provider)
-    callback = provider.meter.counters["aerospike.client.cluster.command_count"][0]
+    callback = provider.meter.counters["aerospike_client_command_count"][0]
     billing = OtelExporter(provider)
 
     assert orders.registry is billing.registry
     assert orders.meter_provider is billing.meter_provider
-    assert provider.meter.counters["aerospike.client.cluster.command_count"] == [callback]
+    assert provider.meter.counters["aerospike_client_command_count"] == [callback]
 
     orders.export(_Snapshot(_client("orders", 2)))
     billing.export(_Snapshot(_client("billing", 5)))
@@ -116,7 +116,7 @@ def test_two_exporters_on_one_sdk_provider_are_both_collected():
     for resource in data.resource_metrics:
         for scope in resource.scope_metrics:
             for metric in scope.metrics:
-                if metric.name != "aerospike.client.cluster.command_count":
+                if metric.name != "aerospike_client_command_count":
                     continue
                 for point in metric.data.data_points:
                     seen[point.attributes["app_id"]] = point.value

@@ -29,7 +29,7 @@ def test_instruments_are_registered_without_shutting_down_the_provider():
     exporter = OtelExporter(provider)
 
     assert exporter.meter_provider is provider
-    assert provider.meter_name == "aerospike.client"
+    assert provider.meter_name == "aerospike_client"
     registered = set(provider.meter.counters) | set(provider.meter.gauges)
     assert registered == EXPECTED_METRIC_NAMES
     assert provider.shutdowns == 0

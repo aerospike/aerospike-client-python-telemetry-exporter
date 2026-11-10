@@ -36,31 +36,27 @@ class InstrumentKind(str, Enum):
 
 
 # Snapshot label key to the name exported on every series. A key that is
-# absent keeps its own name. The node id, address, port, and namespace are
-# read off each node object and renamed here.
+# absent keeps its own name. Node, address, port, and namespace are set
+# directly from each node object.
 LABEL_MAP = {
     "cluster_name": "cluster",
     "client_type": "client_type",
     "client_version": "client_version",
     "app_id": "app_id",
-    "node": "server_node_id",
-    "node_address": "server_node_address",
-    "node_port": "server_node_port",
-    "namespace": "ns",
 }
 
 # Exported names a webapp label must not replace. Identity and the dimensions
-# this package adds (server node id, namespace, bucket bound) occupy them.
+# this package adds (node, namespace, bucket bound) occupy them.
 RESERVED_LABELS = frozenset(
     {
         "cluster",
         "client_type",
         "client_version",
         "app_id",
-        "server_node_id",
-        "server_node_address",
-        "server_node_port",
-        "ns",
+        "node",
+        "node_address",
+        "node_port",
+        "namespace",
         "le",
         "latency_type",
         "latency_unit",
@@ -72,8 +68,8 @@ RESERVED_LABELS = frozenset(
 _IDENTITY = ("client_type", "client_version", "cluster_name", "app_id")
 _CLIENT_APP_IP_LABEL = "client_app_ip"
 _client_app_ip = ""
-_NODE_LABELS = ("server_node_id", "server_node_address", "server_node_port")
-_NAMESPACE_LABELS = _NODE_LABELS + ("ns",)
+_NODE_LABELS = ("node", "node_address", "node_port")
+_NAMESPACE_LABELS = _NODE_LABELS + ("namespace",)
 
 
 @dataclass(frozen=True)
@@ -110,187 +106,165 @@ def _counter(
 
 def _metrics() -> dict[str, MetricDescriptor]:
     metrics = {
-        "recover_queue_size": _gauge(
-            "recover_queue_size",
-            "aerospike.client.cluster.recover_queue_size",
+        "cluster.recover_queue.size": _gauge(
+            "cluster.recover_queue.size",
+            "aerospike_client_recover_queue_size",
             "Connections waiting in the recovery queue",
             "{connection}",
         ),
-        "invalid_node_count": _counter(
-            "invalid_node_count",
-            "aerospike.client.cluster.invalid_node_count",
-            "Lifetime count of invalid-node events",
-            "{event}",
+        "cluster.nodes.invalid": _counter(
+            "cluster.nodes.invalid",
+            "aerospike_client_invalid_node_count",
+            "Invalid nodes reported by the client",
+            "{node}",
         ),
-        "delay_queue_timeout_count": _counter(
-            "delay_queue_timeout_count",
-            "aerospike.client.cluster.delay_queue_timeout_count",
-            "Delay-queue timeouts. Stays 0 until the native snapshot reports it",
-            "{timeout}",
-        ),
-        "validation_open_failure": _counter(
-            "validation_open_failure",
-            "aerospike.client.cluster.validation_open_failure",
-            "Connection open failures while validating a node. Stays 0 until native reports it",
-            "{error}",
-        ),
-        "validation_tls_handshake_failure": _counter(
-            "validation_tls_handshake_failure",
-            "aerospike.client.cluster.validation_tls_handshake_failure",
-            "TLS handshake failures while validating a node. Stays 0 until native reports it",
-            "{error}",
-        ),
-        "validation_auth_failure": _counter(
-            "validation_auth_failure",
-            "aerospike.client.cluster.validation_auth_failure",
-            "Authentication failures while validating a node. Stays 0 until native reports it",
-            "{error}",
-        ),
-        "command_retries": _counter(
-            "command_retries",
-            "aerospike.client.cluster.retry_count",
-            "Transaction retries",
-            "{retry}",
-        ),
-        "total_nodes": _gauge(
-            "total_nodes",
-            "aerospike.client.cluster.total_nodes",
+        "cluster.nodes.active": _gauge(
+            "cluster.nodes.active",
+            "aerospike_client_nodes_active",
             "Current cluster node count",
             "{node}",
         ),
-        "open_connections": _gauge(
-            "open_connections",
-            "aerospike.client.cluster.open_connections",
-            "Connections currently open across the cluster",
-            "{connection}",
+        "cluster.command_retries": _counter(
+            "cluster.command_retries",
+            "aerospike_client_command_retries",
+            "Transaction retries",
+            "{retry}",
         ),
-        "cpu_percent": _gauge(
-            "cpu_percent",
-            "aerospike.client.cluster.cpu_percent",
+        "cluster.cpu_percent": _gauge(
+            "cluster.cpu_percent",
+            "aerospike_client_cpu_percent",
             "Client process CPU utilization",
             "%",
         ),
-        "memory_bytes": _gauge(
-            "memory_bytes",
-            "aerospike.client.cluster.memory_bytes",
+        "cluster.memory_bytes": _gauge(
+            "cluster.memory_bytes",
+            "aerospike_client_memory_bytes",
             "Client process memory usage",
             "By",
         ),
-        "command_count": _counter(
-            "command_count",
-            "aerospike.client.cluster.command_count",
+        "cluster.command_count": _counter(
+            "cluster.command_count",
+            "aerospike_client_command_count",
             "Commands issued by the client",
-            "{command}",
-        ),
-        "batch_partial_failure": _counter(
-            "batch_partial_failure",
-            "aerospike.client.cluster.batch_partial_failure",
-            "Batch commands that completed with a partial failure. Stays 0 until native reports it",
             "{command}",
         ),
         "node.connections.in_use": _gauge(
             "node.connections.in_use",
-            "aerospike.client.node.connections_in_use",
+            "aerospike_client_node_connections_in_use",
             "Connections currently in use",
             "{connection}",
             _NODE_LABELS,
         ),
         "node.connections.in_pool": _gauge(
             "node.connections.in_pool",
-            "aerospike.client.node.connections_in_pool",
+            "aerospike_client_node_connections_in_pool",
             "Idle connections in the pool",
             "{connection}",
             _NODE_LABELS,
         ),
         "node.connections.opened": _counter(
             "node.connections.opened",
-            "aerospike.client.node.connections_opened",
+            "aerospike_client_node_connections_opened",
             "Connections opened",
             "{connection}",
             _NODE_LABELS,
         ),
         "node.connections.closed": _counter(
             "node.connections.closed",
-            "aerospike.client.node.connections_closed",
+            "aerospike_client_node_connections_closed",
             "Connections closed",
             "{connection}",
             _NODE_LABELS,
         ),
-        "node.connection_open_failure": _counter(
-            "node.connection_open_failure",
-            "aerospike.client.node.connection_open_failure",
+        "node.connections.open_failure": _counter(
+            "node.connections.open_failure",
+            "aerospike_client_node_connection_open_failure",
             "Connection open failures on an existing node",
             "{error}",
             _NODE_LABELS,
         ),
-        "node.connection_tls_handshake_failure": _counter(
-            "node.connection_tls_handshake_failure",
-            "aerospike.client.node.connection_tls_handshake_failure",
+        "node.connections.tls_handshake_failure": _counter(
+            "node.connections.tls_handshake_failure",
+            "aerospike_client_node_connection_tls_handshake_failure",
             "TLS handshake failures on an existing node",
             "{error}",
             _NODE_LABELS,
         ),
-        "node.connection_auth_failure": _counter(
-            "node.connection_auth_failure",
-            "aerospike.client.node.connection_auth_failure",
+        "node.connections.auth_failure": _counter(
+            "node.connections.auth_failure",
+            "aerospike_client_node_connection_auth_failure",
             "Authentication failures on an existing node",
             "{error}",
             _NODE_LABELS,
         ),
+        "node.connections.closed_error": _counter(
+            "node.connections.closed_error",
+            "aerospike_client_node_connection_closed_error",
+            "Connections closed because of an error",
+            "{connection}",
+            _NODE_LABELS,
+        ),
+        "node.connections.closed_idle": _counter(
+            "node.connections.closed_idle",
+            "aerospike_client_node_connection_closed_idle",
+            "Connections closed after exceeding the idle limit",
+            "{connection}",
+            _NODE_LABELS,
+        ),
+        "node.connections.closed_node_removed": _counter(
+            "node.connections.closed_node_removed",
+            "aerospike_client_node_connection_closed_node_removed",
+            "Connections closed because the node left the cluster",
+            "{connection}",
+            _NODE_LABELS,
+        ),
         "namespace.errors": _counter(
             "namespace.errors",
-            "aerospike.client.namespace.errors",
+            "aerospike_client_namespace_errors",
             "Namespace operation errors",
             "{error}",
             _NAMESPACE_LABELS,
         ),
-        "namespace.server_timeouts": _counter(
-            "namespace.server_timeouts",
-            "aerospike.client.namespace.server_timeouts",
+        "namespace.timeouts": _counter(
+            "namespace.timeouts",
+            "aerospike_client_namespace_server_timeouts",
             "Namespace operation timeouts reported by the server",
             "{timeout}",
             _NAMESPACE_LABELS,
         ),
         "namespace.key_busy": _counter(
             "namespace.key_busy",
-            "aerospike.client.namespace.key_busy",
+            "aerospike_client_namespace_key_busy",
             "Namespace key-busy errors",
             "{error}",
             _NAMESPACE_LABELS,
         ),
         "namespace.record_too_big": _counter(
             "namespace.record_too_big",
-            "aerospike.client.namespace.record_too_big",
+            "aerospike_client_namespace_record_too_big",
             "Namespace record-too-big errors",
             "{error}",
             _NAMESPACE_LABELS,
         ),
         "namespace.device_overload": _counter(
             "namespace.device_overload",
-            "aerospike.client.namespace.device_overload",
+            "aerospike_client_namespace_device_overload",
             "Namespace device-overload errors",
             "{error}",
             _NAMESPACE_LABELS,
         ),
         "namespace.bytes_in": _counter(
             "namespace.bytes_in",
-            "aerospike.client.namespace.bytes_in",
+            "aerospike_client_namespace_bytes_in",
             "Bytes received for namespace operations",
             "By",
             _NAMESPACE_LABELS,
         ),
         "namespace.bytes_out": _counter(
             "namespace.bytes_out",
-            "aerospike.client.namespace.bytes_out",
+            "aerospike_client_namespace_bytes_out",
             "Bytes sent for namespace operations",
             "By",
-            _NAMESPACE_LABELS,
-        ),
-        "namespace.client_timeouts": _counter(
-            "namespace.client_timeouts",
-            "aerospike.client.namespace.client_timeouts",
-            "Client-side namespace timeouts. Stays 0 until native reports it",
-            "{timeout}",
             _NAMESPACE_LABELS,
         ),
     }
@@ -301,51 +275,41 @@ def _metrics() -> dict[str, MetricDescriptor]:
             description,
             "{call}",
         )
-    metrics["node.latency.conn"] = _counter(
-        "node.latency.conn",
-        "aerospike.client.node.conn_latency_bucket",
-        "Cumulative node connection-acquisition latency observations by upper bound",
-        "{operation}",
-        _NODE_LABELS + ("latency_type", "le", "latency_unit"),
-    )
     metrics["cluster.latency"] = _counter(
         "cluster.latency",
-        "aerospike.client.cluster.latency_bucket",
+        "aerospike_client_latency_bucket",
         "Cumulative whole-call latency observations by latency type and upper bound",
         "{operation}",
         ("latency_type", "le", "latency_unit"),
     )
     metrics["namespace.latency"] = _counter(
         "namespace.latency",
-        "aerospike.client.namespace.latency_bucket",
-        "Cumulative namespace RPC latency observations by latency type and upper bound",
+        "aerospike_client_namespace_latency_bucket",
+        "Cumulative namespace RPC latency by latency type and upper bound",
         "{operation}",
         _NAMESPACE_LABELS + ("latency_type", "le", "latency_unit"),
+    )
+    metrics["node.latency.conn"] = _counter(
+        "node.latency.conn",
+        "aerospike_client_node_conn_latency_bucket",
+        "Cumulative successful socket-open latency by upper bound",
+        "{operation}",
+        _NODE_LABELS + ("latency_type", "le", "latency_unit"),
     )
     return metrics
 
 
-# Canonical usage key to one exported counter.
-# feature.api.blocking -> aerospike.client.feature.api_blocking.
+# v1 usage names from the export table. Later feature.* rows stay off this
+# list until they are promoted. Stage stores the dotted counter name.
 _USAGE_METRICS = (
-    ("blocking", "aerospike.client.feature.api_blocking", "Blocking API calls"),
-    ("deferred", "aerospike.client.feature.api_deferred", "Deferred API calls"),
-    ("background", "aerospike.client.feature.api_background", "Background API calls"),
-    ("shape_point", "aerospike.client.feature.shape_point", "Single-key API calls"),
-    ("shape_batch", "aerospike.client.feature.shape_batch", "Batch API calls"),
-    ("shape_query", "aerospike.client.feature.shape_query", "Query and scan API calls"),
-    (
-        "object_mapping_read",
-        "aerospike.client.feature.object_mapping_read",
-        "Object-mapping reads",
-    ),
-    (
-        "object_mapping_write",
-        "aerospike.client.feature.object_mapping_write",
-        "Object-mapping writes",
-    ),
-    ("filter_ael", "aerospike.client.feature.filter_ael", "AEL record filters"),
-    ("filter_exp", "aerospike.client.feature.filter_exp", "Expression record filters"),
+    ("feature.api.blocking", "aerospike_client_feature_api_blocking", "Blocking API calls"),
+    ("feature.api.deferred", "aerospike_client_feature_api_deferred", "Deferred API calls"),
+    ("feature.api.background", "aerospike_client_feature_api_background", "Background API calls"),
+    ("feature.shape.point", "aerospike_client_feature_shape_point", "Single-key API calls"),
+    ("feature.shape.batch", "aerospike_client_feature_shape_batch", "Batch API calls"),
+    ("feature.shape.query", "aerospike_client_feature_shape_query", "Query and scan API calls"),
+    ("feature.filter.ael", "aerospike_client_feature_filter_ael", "AEL record filters"),
+    ("feature.filter.exp", "aerospike_client_feature_filter_exp", "Expression record filters"),
 )
 
 
@@ -355,30 +319,31 @@ METRIC_MAP = _metrics()
 # The snapshot can still carry the last totals after the tier is turned off.
 _OPERATIONAL_SOURCES = frozenset(
     {
-        "command_count",
-        "command_retries",
-        "batch_partial_failure",
-        "cpu_percent",
-        "memory_bytes",
+        "cluster.command_count",
+        "cluster.command_retries",
+        "cluster.cpu_percent",
+        "cluster.memory_bytes",
         "cluster.latency",
         "namespace.latency",
-        "validation_open_failure",
-        "validation_tls_handshake_failure",
-        "validation_auth_failure",
-        "node.connection_open_failure",
-        "node.connection_tls_handshake_failure",
-        "node.connection_auth_failure",
         "node.latency.conn",
+        "node.connections.open_failure",
+        "node.connections.tls_handshake_failure",
+        "node.connections.auth_failure",
+        "node.connections.closed_error",
+        "node.connections.closed_idle",
+        "node.connections.closed_node_removed",
         "namespace.errors",
-        "namespace.server_timeouts",
+        "namespace.timeouts",
         "namespace.key_busy",
         "namespace.record_too_big",
         "namespace.device_overload",
         "namespace.bytes_in",
         "namespace.bytes_out",
-        "namespace.client_timeouts",
     }
 )
+
+_CLUSTER_LATENCY_GROUPS = ("read", "write", "batch", "query")
+_NAMESPACE_LATENCY_GROUPS = _CLUSTER_LATENCY_GROUPS
 
 
 def _tier_is_off(document: Mapping[str, Any], source: str) -> bool:
@@ -481,8 +446,8 @@ def series_attributes(
     a reserved name is dropped. ``client_app_ip`` is not a series label: a
     pod address would multiply every series by the number of pods.
     :func:`client_app_ip` still resolves that address for callers that want
-    it. ``extra`` holds dimensions for this point, such as ``server_node_id``
-    or ``ns``, and those are renamed by the same map.
+    it. ``extra`` holds dimensions for this point, such as ``node`` or
+    ``namespace``, and those are renamed by the same map.
     """
     attributes: dict[str, str] = {}
     for source in _IDENTITY:
@@ -525,54 +490,56 @@ def iter_metric_points(
     A missing flag omits that tier. Always-on gauges are still yielded.
 
     Node and namespace series include ``nodes`` and any ``nodes_departed``
-    entry whose ``node_name`` is not still in ``nodes``. A name in both lists
-    is published from ``nodes`` only.
+    entry whose ``name`` is not still in ``nodes``. A name in both lists is
+    published from ``nodes`` only. A departed node with an empty name is
+    still published, because the client uses that name only when it knows it.
     """
     source = descriptor.source
     if _tier_is_off(document, source):
         return
+    cluster = document.get("cluster") if isinstance(document.get("cluster"), Mapping) else {}
     if source == "cluster.latency":
-        for group in ("read", "write", "batch", "query"):
+        latency = cluster.get("latency") if isinstance(cluster, Mapping) else None
+        for group in _CLUSTER_LATENCY_GROUPS:
             yield from _bucket_points(
                 document,
-                _latency_buckets(document.get("cluster_latencies"), group),
+                _histogram_buckets(_group_histogram(latency, group)),
                 {"latency_type": group},
             )
         return
     if source == "namespace.latency":
-        for group in ("read", "write", "batch", "query"):
+        for group in _NAMESPACE_LATENCY_GROUPS:
             for node in _nodes_to_export(document):
                 node_labels = _node_labels(node)
                 for namespace in _mappings(node.get("namespaces")):
                     point = dict(node_labels)
                     point["latency_type"] = group
-                    if namespace.get("namespace"):
-                        point["ns"] = str(namespace["namespace"])
+                    if namespace.get("name"):
+                        point["namespace"] = str(namespace["name"])
                     yield from _bucket_points(
                         document,
-                        _latency_buckets(namespace.get("latencies"), group),
+                        _histogram_buckets(_group_histogram(namespace.get("latency"), group)),
                         point,
                     )
         return
-    if source.startswith("usage."):
-        feature = source.split(".", 1)[1]
-        usage = document.get("usage") or {}
-        if isinstance(usage, Mapping) and feature in usage:
-            number = _number(usage.get(feature))
-            if number is not None:
-                yield number, {}
-        return
     if source == "node.latency.conn":
         for node in _nodes_to_export(document):
-            histogram = node.get("conn_latency")
-            buckets = (
-                histogram.get("bucket_counts")
-                if isinstance(histogram, Mapping) and histogram.get("type") == "conn"
-                else None
-            )
+            latency = node.get("latency") if isinstance(node.get("latency"), Mapping) else None
             point = _node_labels(node)
             point["latency_type"] = "conn"
-            yield from _bucket_points(document, buckets, point)
+            yield from _bucket_points(
+                document,
+                _histogram_buckets(_group_histogram(latency, "conn")),
+                point,
+            )
+        return
+    if source.startswith("usage."):
+        counter = source.split(".", 1)[1]
+        usage = document.get("usage") or {}
+        if isinstance(usage, Mapping) and counter in usage:
+            number = _number(usage.get(counter))
+            if number is not None:
+                yield number, {}
         return
     if source.startswith("namespace."):
         field = source.split(".", 1)[1]
@@ -583,8 +550,8 @@ def iter_metric_points(
                 if number is None:
                     continue
                 point = dict(extra)
-                if namespace.get("namespace"):
-                    point["ns"] = str(namespace["namespace"])
+                if namespace.get("name"):
+                    point["namespace"] = str(namespace["name"])
                 yield number, point
         return
     if source.startswith("node."):
@@ -604,15 +571,16 @@ def _nodes_to_export(document: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     """Live nodes, then departed nodes that are not still listed in ``nodes``.
 
     A node that leaves and is still absent at the next snapshot is in
-    ``nodes_departed`` with its final counters. The same ``node_name`` in
-    both lists is published from ``nodes`` only.
+    ``nodes_departed`` with its final counters. The same non-empty ``name``
+    in both lists is published from ``nodes`` only. An empty name does not
+    match another empty name.
     """
     active = list(_mappings(document.get("nodes")))
-    seen = {node.get("node_name") for node in active}
+    seen = {node.get("name") for node in active if node.get("name")}
     departed = [
         node
         for node in _mappings(document.get("nodes_departed"))
-        if node.get("node_name") not in seen
+        if not node.get("name") or node.get("name") not in seen
     ]
     return active + departed
 
@@ -625,20 +593,40 @@ def _mappings(value: Any) -> Iterator[Mapping[str, Any]]:
 
 def _node_labels(node: Mapping[str, Any]) -> dict[str, str]:
     labels: dict[str, str] = {}
-    if node.get("node_name"):
-        labels["server_node_id"] = str(node["node_name"])
-    if node.get("node_address"):
-        labels["server_node_address"] = str(node["node_address"])
-    if node.get("node_port") is not None:
-        labels["server_node_port"] = str(node["node_port"])
+    if node.get("name"):
+        labels["node"] = str(node["name"])
+    if node.get("address"):
+        labels["node_address"] = str(node["address"])
+    if node.get("port") is not None:
+        labels["node_port"] = str(node["port"])
     return labels
 
 
-def _latency_buckets(latencies: Any, group: str) -> Any:
-    for latency in _mappings(latencies):
-        if latency.get("type") == group:
-            return latency.get("bucket_counts")
+def _group_histogram(latency: Any, group: str) -> Any:
+    if isinstance(latency, Mapping):
+        return latency.get(group)
     return None
+
+
+def _histogram_buckets(histogram: Any) -> Any:
+    """Bucket counts for one latency group.
+
+    The stage document always includes every group. A group with nothing
+    recorded is all zeros, and publishing it would add an empty series for
+    every namespace. A group with any observation is published in full,
+    including buckets whose count is zero.
+    """
+    if not isinstance(histogram, Mapping):
+        return None
+    buckets = histogram.get("buckets")
+    if not isinstance(buckets, (list, tuple)) or not buckets:
+        return None
+    count = _number(histogram.get("count"))
+    if count == 0:
+        return None
+    if count is None and not any(_number(item) for item in buckets):
+        return None
+    return buckets
 
 
 def _bucket_points(

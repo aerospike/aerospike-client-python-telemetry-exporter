@@ -32,6 +32,7 @@ from aerospike_client_telemetry.otel import OtelExporter
 from tests.fake_provider import RecordingProvider
 from tests.integration.support import (
     CALLBACK_TIMEOUT_SECONDS,
+    command_count,
     custom_metrics_settings,
     namespace,
     seed_host,
@@ -139,7 +140,7 @@ def test_three_exporters_receive_the_same_metrics():
         assert metrics[0]["app_id"] == "orders-service"
         assert metrics[0]["operational_metrics_enabled"] is True
         assert metrics[0]["usage_metrics_enabled"] is True
-        assert metrics[0]["command_count"] >= 1
+        assert command_count(metrics[0]) >= 1
         assert metrics[0]["nodes"]
     finally:
         _shutdown(cluster)

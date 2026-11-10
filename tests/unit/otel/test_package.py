@@ -84,11 +84,11 @@ async def test_async_otel_exporter_matches_the_async_protocol():
 
 def test_catalog_rejects_a_conflicting_descriptor():
     catalog = MetricCatalog()
-    counter = MetricDescriptor("aerospike.client.commands", InstrumentKind.COUNTER, "commands")
+    counter = MetricDescriptor("aerospike_client_commands", InstrumentKind.COUNTER, "commands")
     catalog.register(counter)
     catalog.register(counter)
     with pytest.raises(ValueError, match="already registered"):
         catalog.register(
-            MetricDescriptor("aerospike.client.commands", InstrumentKind.GAUGE, "commands")
+            MetricDescriptor("aerospike_client_commands", InstrumentKind.GAUGE, "commands")
         )
     assert len(catalog) == 1

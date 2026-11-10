@@ -34,7 +34,7 @@ from tests.integration.otel.test_passed_provider import (
     _wait_for_snapshot,
     _write,
 )
-from tests.integration.support import custom_metrics_settings, namespace, seed_host
+from tests.integration.support import command_count, custom_metrics_settings, namespace, seed_host
 
 pytestmark = pytest.mark.integration
 
@@ -93,12 +93,12 @@ def test_a_file_reload_drops_operational_metrics(tmp_path, monkeypatch):
                 lambda document: (
                     document.get("metrics_enabled") is True
                     and document.get("operational_metrics_enabled") is True
-                    and document.get("command_count", 0) >= 1
+                    and (command_count(document) or 0) >= 1
                 ),
             )
             collected = _collected(reader)
-            assert collected["aerospike.client.cluster.command_count"][0] == "aerospike.client"
-            assert "aerospike.client.cluster.total_nodes" in collected
+            assert collected["aerospike_client_command_count"][0] == "aerospike_client"
+            assert "aerospike_client_nodes_active" in collected
 
             path.write_text(_yaml(operational=False))
             _bump_mtime(str(path))
@@ -112,8 +112,8 @@ def test_a_file_reload_drops_operational_metrics(tmp_path, monkeypatch):
             )
             assert cluster.metrics_enabled() is True
             collected = _collected(reader)
-            assert "aerospike.client.cluster.command_count" not in collected
-            assert "aerospike.client.cluster.total_nodes" in collected
+            assert "aerospike_client_command_count" not in collected
+            assert "aerospike_client_nodes_active" in collected
         finally:
             cluster.close()
             provider.shutdown()

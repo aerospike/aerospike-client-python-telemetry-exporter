@@ -4,7 +4,8 @@ External exporters for Aerospike Python client metrics. The client SDK collects
 the snapshot and calls `export()`. This package translates that snapshot. It
 does not open an OTLP connection and it does not choose HTTP or gRPC.
 
-Series names, labels, tiers, and how a snapshot becomes those series are in
+Series names are `aerospike_client_*` on the meter `aerospike_client`.
+Labels, tiers, and how a snapshot becomes those series are in
 [docs/metrics.md](docs/metrics.md). The field-by-field catalog for a Go or
 other client exporter is in [docs/reference.md](docs/reference.md).
 
@@ -23,12 +24,12 @@ from aerospike_client_telemetry.otel import OtelExporter
 exporter = OtelExporter(provider)
 ```
 
-`AsyncOtelExporter` is the same contract for the async client. The client
-runs that call on its metrics-owned event loop. `export()` only stores the
-snapshot, so it does not use the application's event loop. The SDK no longer
-has `async_exporter_isolation`; async delivery is always isolated. Both
-exporters live in `aerospike_client_telemetry.otel`. Importing the root
-package does not load OpenTelemetry.
+`AsyncOtelExporter` is the same contract for the async client. The SDK builds
+the snapshot on a worker thread, then awaits `export()` on the application's
+event loop. `export()` only stores the document and returns, so that await
+does no network I/O. The sync client calls `export()` from its metrics
+thread. Both exporters live in `aerospike_client_telemetry.otel`. Importing
+the root package does not load OpenTelemetry.
 
 Register the exporter in `CUSTOM` mode with `add_exporter`, then
 `enable_metrics`. On shutdown, disable metrics, close the cluster, and call
@@ -42,10 +43,10 @@ the provider collects both. A second registry on that provider is rejected.
 `export()` stores the latest snapshot and returns. A failed OTLP send does not
 raise from `export()`. If a newer `aerospike-sdk` or OpenTelemetry release
 changes a call this package makes, `export()` lets that exception propagate.
-The client logs it on the metrics thread, keeps the webapp serving, and
-suspends this exporter after three consecutive failures. A failure while
-constructing `OtelExporter` happens on the startup thread, before registration,
-so startup fails.
+The client logs it, continues with the other exporters, and suspends this
+exporter after three consecutive failures. A suspended exporter is retried
+every tenth interval. A failure while constructing `OtelExporter` happens on
+the startup thread, before registration, so startup fails.
 
 The webapp records its own instruments on this same provider. Every reader
 on the provider collects those instruments and the client series. A periodic
@@ -140,9 +141,9 @@ python -m pip install -e '.[dev,otel,prometheus]'
 python -m compileall -q aerospike_client_telemetry tests
 ```
 
-`../aerospike-client-python-sdk` is a checkout of the Python client. Use a
-released `aerospike-sdk` when that release contains the snapshot this package
-reads.
+`../aerospike-client-python-sdk` is a checkout of the Python client on
+`stage`. Use a released `aerospike-sdk` when that release contains the same
+canonical snapshot.
 
 ```bash
 python -m pytest tests/unit

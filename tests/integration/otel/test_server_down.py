@@ -38,7 +38,13 @@ from tests.integration.conftest import (
     _start_server,
 )
 from tests.integration.otel.test_passed_provider import _collected, _running_provider, _write
-from tests.integration.support import custom_metrics_settings, namespace
+from tests.integration.support import (
+    active_node_count,
+    command_count,
+    custom_metrics_settings,
+    invalid_node_count,
+    namespace,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -53,19 +59,21 @@ def _brief(document: dict) -> dict:
     departed = document.get("nodes_departed") or []
 
     def _host(node: dict) -> str:
-        return f"{node.get('node_address')}:{node.get('node_port')}"
+        return f"{node.get('address')}:{node.get('port')}"
 
+    cluster = document.get("cluster") or {}
+    recover = cluster.get("recover_queue") or {}
     return {
         "timestamp": document.get("timestamp"),
         "metrics_enabled": document.get("metrics_enabled"),
         "operational_metrics_enabled": document.get("operational_metrics_enabled"),
         "usage_metrics_enabled": document.get("usage_metrics_enabled"),
-        "total_nodes": document.get("total_nodes"),
-        "invalid_node_count": document.get("invalid_node_count"),
-        "open_connections": document.get("open_connections"),
-        "recover_queue_size": document.get("recover_queue_size"),
-        "command_count": document.get("command_count"),
-        "command_retries": document.get("command_retries"),
+        "nodes_active": active_node_count(document),
+        "invalid_node_count": invalid_node_count(document),
+        "connections_in_use": (cluster.get("connections") or {}).get("in_use"),
+        "recover_queue_size": recover.get("size"),
+        "command_count": command_count(document),
+        "command_retries": cluster.get("command_retries"),
         "nodes": [_host(node) for node in nodes],
         "nodes_departed": [_host(node) for node in departed],
     }
@@ -113,8 +121,8 @@ def _connect(seed: str, app_id: str, exporter: OtelExporter, provider, *, altern
 def _published(reader) -> tuple[set[str], set[str], set[str]]:
     """Client metric names, node ids, and ``address:port`` hosts on this collect.
 
-    A departed node often has no ``node_name``. Its series still carry
-    ``server_node_address`` and ``server_node_port``.
+    A departed node often has no ``name``. Its series still carry
+    ``node_address`` and ``node_port``.
     """
     data = reader.get_metrics_data()
     names: set[str] = set()
@@ -124,7 +132,7 @@ def _published(reader) -> tuple[set[str], set[str], set[str]]:
         return names, nodes, hosts
     for resource in data.resource_metrics:
         for scope in resource.scope_metrics:
-            if scope.scope.name != "aerospike.client":
+            if scope.scope.name != "aerospike_client":
                 continue
             for metric in scope.metrics:
                 points = list(metric.data.data_points)
@@ -133,11 +141,11 @@ def _published(reader) -> tuple[set[str], set[str], set[str]]:
                 names.add(metric.name)
                 for point in points:
                     attributes = dict(point.attributes)
-                    node = attributes.get("server_node_id")
+                    node = attributes.get("node")
                     if node:
                         nodes.add(str(node))
-                    address = attributes.get("server_node_address")
-                    port = attributes.get("server_node_port")
+                    address = attributes.get("node_address")
+                    port = attributes.get("node_port")
                     if address and port is not None:
                         hosts.add(f"{address}:{port}")
     return names, nodes, hosts
@@ -155,7 +163,7 @@ def _enable(cluster, exporter: OtelExporter, dataset) -> dict:
             doc.get("metrics_enabled") is True
             and doc.get("operational_metrics_enabled") is True
             and doc.get("usage_metrics_enabled") is True
-            and int(doc.get("total_nodes") or 0) >= 1
+            and int(active_node_count(doc) or 0) >= 1
             and doc.get("nodes")
         ),
     )
@@ -172,8 +180,8 @@ def test_metrics_keep_flowing_when_the_only_server_stops(monkeypatch):
     try:
         healthy = _enable(cluster, exporter, dataset)
         assert len(healthy["nodes"]) == 1
-        before = int(healthy["command_count"])
-        live_host = f"{healthy['nodes'][0]['node_address']}:{healthy['nodes'][0]['node_port']}"
+        before = int(command_count(healthy))
+        live_host = f"{healthy['nodes'][0]['address']}:{healthy['nodes'][0]['port']}"
 
         container.stop()
         # The only seed stays in the client's node list while tend is refused.
@@ -186,27 +194,27 @@ def test_metrics_keep_flowing_when_the_only_server_stops(monkeypatch):
             assert row["metrics_enabled"] is True
             assert row["operational_metrics_enabled"] is True
             assert row["usage_metrics_enabled"] is True
-            assert row["total_nodes"] == 1
+            assert row["nodes_active"] == 1
             assert row["invalid_node_count"] == 0
             assert row["nodes"] == [live_host]
             assert row["nodes_departed"] == []
             assert row["command_count"] == before
 
         names, node_labels, _hosts = _published(reader)
-        assert "aerospike.client.cluster.total_nodes" in names
-        assert "aerospike.client.cluster.invalid_node_count" in names
-        assert "aerospike.client.cluster.open_connections" in names
-        assert "aerospike.client.cluster.recover_queue_size" in names
-        assert "aerospike.client.cluster.command_count" in names
-        assert "aerospike.client.cluster.cpu_percent" in names
-        assert "aerospike.client.cluster.memory_bytes" in names
-        assert "aerospike.client.feature.api_blocking" in names
-        assert "aerospike.client.node.connections_in_pool" in names
+        assert "aerospike_client_nodes_active" in names
+        assert "aerospike_client_invalid_node_count" in names
+        assert "aerospike_client_node_connections_in_use" in names
+        assert "aerospike_client_recover_queue_size" in names
+        assert "aerospike_client_command_count" in names
+        assert "aerospike_client_cpu_percent" in names
+        assert "aerospike_client_memory_bytes" in names
+        assert "aerospike_client_feature_api_blocking" in names
+        assert "aerospike_client_node_connections_in_pool" in names
         assert len(node_labels) == 1
         collected = _collected(reader)
-        assert collected["aerospike.client.cluster.total_nodes"] == ("aerospike.client", 1)
-        assert collected["aerospike.client.cluster.invalid_node_count"] == ("aerospike.client", 0)
-        assert collected["aerospike.client.cluster.command_count"][1] == before
+        assert collected["aerospike_client_nodes_active"] == ("aerospike_client", 1)
+        assert collected["aerospike_client_invalid_node_count"] == ("aerospike_client", 0)
+        assert collected["aerospike_client_command_count"][1] == before
     finally:
         try:
             cluster.disable_metrics()
@@ -356,10 +364,10 @@ def test_one_node_of_a_two_node_cluster_drops_out_of_the_callback(monkeypatch):
         cluster = _connect(seeds[0], "pair-down", exporter, provider, alternate=True)
         dataset = DataSet.of(namespace(), "pair_down")
         healthy = _enable(cluster, exporter, dataset)
-        assert int(healthy["total_nodes"]) == 2
+        assert int(active_node_count(healthy)) == 2
         assert len(healthy["nodes"]) == 2
-        before = int(healthy["command_count"])
-        stopped_host = f"{healthy['nodes'][1]['node_address']}:{healthy['nodes'][1]['node_port']}"
+        before = int(command_count(healthy))
+        stopped_host = f"{healthy['nodes'][1]['address']}:{healthy['nodes'][1]['port']}"
         # The snapshot addresses are the alternate host endpoints. Stop the
         # container whose published port is that endpoint.
         victim = left if left[2] == stopped_host else right
@@ -373,7 +381,7 @@ def test_one_node_of_a_two_node_cluster_drops_out_of_the_callback(monkeypatch):
                 doc.get("timestamp") != healthy["timestamp"]
                 and len(doc.get("nodes") or []) == 1
                 and any(
-                    stopped_host == f"{node.get('node_address')}:{node.get('node_port')}"
+                    stopped_host == f"{node.get('address')}:{node.get('port')}"
                     for node in doc.get("nodes_departed") or []
                 )
             ),
@@ -381,21 +389,21 @@ def test_one_node_of_a_two_node_cluster_drops_out_of_the_callback(monkeypatch):
         assert down is not None, f"node stop was not reflected: {history}"
         assert down["metrics_enabled"] is True
         assert down["operational_metrics_enabled"] is True
-        assert int(down["total_nodes"]) == 1
-        assert int(down["command_count"]) >= before
-        survivor_host = f"{down['nodes'][0]['node_address']}:{down['nodes'][0]['node_port']}"
+        assert int(active_node_count(down)) == 1
+        assert int(command_count(down)) >= before
+        survivor_host = f"{down['nodes'][0]['address']}:{down['nodes'][0]['port']}"
         assert survivor_host == survivor[2]
 
         names, node_labels, hosts = _published(reader)
-        assert "aerospike.client.cluster.total_nodes" in names
-        assert "aerospike.client.cluster.invalid_node_count" in names
-        assert "aerospike.client.cluster.command_count" in names
-        assert "aerospike.client.node.connections_in_pool" in names
-        assert _collected(reader)["aerospike.client.cluster.total_nodes"][1] == 1
-        live_names = {node.get("node_name") for node in down["nodes"] if node.get("node_name")}
+        assert "aerospike_client_nodes_active" in names
+        assert "aerospike_client_invalid_node_count" in names
+        assert "aerospike_client_command_count" in names
+        assert "aerospike_client_node_connections_in_pool" in names
+        assert _collected(reader)["aerospike_client_nodes_active"][1] == 1
+        live_names = {node.get("name") for node in down["nodes"] if node.get("name")}
         assert live_names <= node_labels
-        # A departed node has address and port. Its node_name is often blank,
-        # so the series omits server_node_id rather than publishing an empty one.
+        # A departed node has address and port. Its name is often blank,
+        # so the series omits node rather than publishing an empty one.
         assert survivor_host in hosts
         assert stopped_host in hosts
     finally:

@@ -37,8 +37,8 @@ from opentelemetry.sdk.metrics.export import (
     PeriodicExportingMetricReader,
 )
 
-_COMMAND = "aerospike.client.cluster.command_count"
-_NODES = "aerospike.client.cluster.total_nodes"
+_COMMAND = "aerospike_client_command_count"
+_NODES = "aerospike_client_nodes_active"
 _WAIT_SECONDS = 3
 
 
@@ -75,7 +75,7 @@ class _Capture(MetricExporter):
         return [row for batch in batches if (row := _reading(batch))]
 
 
-def _document(command_count: int, total_nodes: int, stamp: str) -> _Snapshot:
+def _document(command_count: int, nodes_active: int, stamp: str) -> _Snapshot:
     return _Snapshot(
         {
             "timestamp": stamp,
@@ -84,8 +84,10 @@ def _document(command_count: int, total_nodes: int, stamp: str) -> _Snapshot:
             "cluster_name": "local",
             "app_id": "interval",
             "operational_metrics_enabled": True,
-            "command_count": command_count,
-            "total_nodes": total_nodes,
+            "cluster": {
+                "command_count": command_count,
+                "nodes": {"active": nodes_active},
+            },
         }
     )
 
@@ -94,7 +96,7 @@ def _reading(metrics_data) -> dict[str, float] | None:
     found: dict[str, float] = {}
     for resource in metrics_data.resource_metrics:
         for scope in resource.scope_metrics:
-            if scope.scope.name != "aerospike.client":
+            if scope.scope.name != "aerospike_client":
                 continue
             for metric in scope.metrics:
                 if metric.name not in (_COMMAND, _NODES):

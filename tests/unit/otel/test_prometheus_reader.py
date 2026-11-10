@@ -55,8 +55,8 @@ from opentelemetry.sdk.metrics.export import (
     PeriodicExportingMetricReader,
 )
 
-_NODES = "aerospike.client.cluster.total_nodes"
-_PROMETHEUS_NODES = "aerospike_client_cluster_total_nodes"
+_NODES = "aerospike_client_nodes_active"
+_PROMETHEUS_NODES = "aerospike_client_nodes_active"
 _WAIT_SECONDS = 3
 
 
@@ -98,14 +98,14 @@ class _Capture(MetricExporter):
         return counts
 
 
-def _document(total_nodes: int) -> _Snapshot:
+def _document(nodes_active: int) -> _Snapshot:
     return _Snapshot(
         {
             "client_type": "python-sdk",
             "client_version": "1.0.0",
             "cluster_name": "local",
             "app_id": "orders",
-            "total_nodes": total_nodes,
+            "cluster": {"nodes": {"active": nodes_active}},
         }
     )
 
@@ -190,7 +190,7 @@ def _prometheus_value(text: str, name: str) -> float:
 def _otel_value(metrics_data, name: str) -> float | None:
     for resource in metrics_data.resource_metrics:
         for scope in resource.scope_metrics:
-            if scope.scope.name != "aerospike.client":
+            if scope.scope.name != "aerospike_client":
                 continue
             for metric in scope.metrics:
                 if metric.name != name:
@@ -201,15 +201,15 @@ def _otel_value(metrics_data, name: str) -> float | None:
     return None
 
 
-def _wait_for_nodes(capture: _Capture, total_nodes: float) -> None:
+def _wait_for_nodes(capture: _Capture, nodes_active: float) -> None:
     deadline = time.monotonic() + _WAIT_SECONDS
     last: list[float] = []
     while time.monotonic() < deadline:
         last = capture.node_counts()
-        if total_nodes in last:
+        if nodes_active in last:
             return
         time.sleep(0.02)
-    raise AssertionError(f"periodic reader did not report {total_nodes} nodes: {last}")
+    raise AssertionError(f"periodic reader did not report nodes_active {nodes_active}: {last}")
 
 
 def test_a_prometheus_reader_serves_the_published_snapshot():
@@ -454,7 +454,7 @@ def _wait_for_series(capture: _SeriesCapture, scope: str, name: str, expected: f
 def _assert_shared_series(capture: _SeriesCapture) -> None:
     _wait_for_series(capture, "orders", _ORDERS_PLACED, 2.0)
     _wait_for_series(capture, "orders", _ORDERS_BACKLOG, 4.0)
-    _wait_for_series(capture, "aerospike.client", _NODES, 2.0)
+    _wait_for_series(capture, "aerospike_client", _NODES, 2.0)
 
 
 def _assert_prometheus_mix(port: int) -> None:

@@ -6,62 +6,97 @@ exporter contract, dependencies, and install are in the
 shape, and translation rules for a Go or other client exporter are in
 [reference.md](reference.md).
 
-The snapshot is one document per client. The identity is `client_type`,
-`client_version`, `cluster_name`, and `app_id`. Two clients that share those
-four values are one series. The webapp sets a distinct `app_id` per client.
-There is no `cluster` object in the document. Cluster-wide fields sit on the
-document next to `command_count`.
-
-`client_timeouts` is only on each namespace object,
-`nodes[].namespaces[].client_timeouts`. It is not repeated on the document.
+The snapshot is one document per client, the canonical document from the
+Python client SDK on `stage`. The identity is `client_type`, `client_version`,
+`cluster_name`, and `app_id`. Two clients that share those four values are
+one series. The webapp sets a distinct `app_id` per client. Cluster-wide
+fields sit on the document's `cluster` object.
 
 Tier 0 is published whenever metrics are enabled. Operational series are
 published only when `operational_metrics_enabled` is true. Usage series are
 published only when `usage_metrics_enabled` is true. A missing flag omits
 that tier.
 
-Every metric is `aerospike.client.<context>.<stat>`. The context stays in the
-name: `cluster`, `node`, `namespace`, or `feature`. For example,
-`aerospike.client.cluster.command_count` and
-`aerospike.client.node.connections_in_use`. A Prometheus exporter replaces
-each dot with an underscore. Counters also gain a `_total` suffix. The Python
-scrape reader follows `PrometheusMetricReader` 0.66b1, including cumulative
-temporality. Its constructor is documented in
+Exported names are `aerospike_client_*`, from the common metric-name table.
+Cluster series have no `cluster` segment: `aerospike_client_command_count`.
+Node series use `aerospike_client_node_`, and namespace series use
+`aerospike_client_namespace_`. The names already use underscores, so a
+Prometheus exporter does not rewrite them. Counters still gain a `_total`
+suffix. The Python scrape reader follows `PrometheusMetricReader` 0.66b1,
+including cumulative temporality. Its constructor is documented in
 [prometheus-reader.md](prometheus-reader.md).
 
-| Metric | Kind | Tier | Where it comes from |
+The full catalog, units, and snapshot paths are in [reference.md](reference.md).
+Every registered name:
+
+| Metric | Kind | Tier | Snapshot path |
 |---|---|---|---|
-| `aerospike.client.cluster.invalid_node_count` | counter | Tier 0 | Lifetime invalid-node events. Not the current node count. |
-| `aerospike.client.cluster.total_nodes` | gauge | Tier 0 | Current cluster size. |
-| `aerospike.client.cluster.recover_queue_size` | gauge | Tier 0 | Connections waiting in the recovery queue. |
-| `aerospike.client.cluster.delay_queue_timeout_count` | counter | Tier 0 | Stays 0 until the native snapshot reports it. |
-| `aerospike.client.cluster.validation_open_failure` | counter | Operational | Seed validation that never becomes a node. Stays 0 until native reports it. |
-| `aerospike.client.cluster.validation_tls_handshake_failure` | counter | Operational | Same, for TLS. |
-| `aerospike.client.cluster.validation_auth_failure` | counter | Operational | Same, for authentication. |
-| `aerospike.client.cluster.batch_partial_failure` | counter | Operational | Batch commands that finished with a partial failure. Stays 0 until native reports it. |
-| `aerospike.client.cluster.cpu_percent` | gauge | Operational | Process CPU. |
-| `aerospike.client.cluster.memory_bytes` | gauge | Operational | Process memory. |
-| `aerospike.client.cluster.latency_bucket` | counter | Operational | Cluster whole-call latency. Label `latency_type` is `read`, `write`, `batch`, or `query`. |
-| `aerospike.client.namespace.latency_bucket` | counter | Operational | Namespace RPC latency. Same `latency_type` label, plus the node labels and `ns`. |
-| `aerospike.client.node.conn_latency_bucket` | counter | Operational | Connection-acquisition latency on a node. Label `latency_type` is `conn`. |
-| `aerospike.client.namespace.client_timeouts` | counter | Operational | Client-side timeouts on that namespace. Stays 0 until native reports it. |
-| `aerospike.client.feature.api_blocking` | counter | Usage | One counter per feature. The other usage names follow the same pattern: `aerospike.client.feature.api_deferred`, `aerospike.client.feature.api_background`, `aerospike.client.feature.shape_point`, `aerospike.client.feature.shape_batch`, `aerospike.client.feature.shape_query`, `aerospike.client.feature.object_mapping_read`, `aerospike.client.feature.object_mapping_write`, `aerospike.client.feature.filter_ael`, `aerospike.client.feature.filter_exp`. |
+| `aerospike_client_recover_queue_size` | gauge | Tier 0 | `cluster.recover_queue.size` |
+| `aerospike_client_invalid_node_count` | counter | Tier 0 | `cluster.nodes.invalid` |
+| `aerospike_client_nodes_active` | gauge | Tier 0 | `cluster.nodes.active` |
+| `aerospike_client_command_count` | counter | Operational | `cluster.command_count` |
+| `aerospike_client_command_retries` | counter | Operational | `cluster.command_retries` |
+| `aerospike_client_cpu_percent` | gauge | Operational | `cluster.cpu_percent` |
+| `aerospike_client_memory_bytes` | gauge | Operational | `cluster.memory_bytes` |
+| `aerospike_client_latency_bucket` | counter | Operational | `cluster.latency` for `read`, `write`, `batch`, `query` |
+| `aerospike_client_node_connections_in_use` | gauge | Tier 0 | `nodes[].connections.in_use` |
+| `aerospike_client_node_connections_in_pool` | gauge | Tier 0 | `nodes[].connections.in_pool` |
+| `aerospike_client_node_connections_opened` | counter | Tier 0 | `nodes[].connections.opened` |
+| `aerospike_client_node_connections_closed` | counter | Tier 0 | `nodes[].connections.closed` |
+| `aerospike_client_node_connection_open_failure` | counter | Operational | `connections.open_failure` |
+| `aerospike_client_node_connection_tls_handshake_failure` | counter | Operational | `connections.tls_handshake_failure` |
+| `aerospike_client_node_connection_auth_failure` | counter | Operational | `connections.auth_failure` |
+| `aerospike_client_node_connection_closed_error` | counter | Operational | `connections.closed_error` |
+| `aerospike_client_node_connection_closed_idle` | counter | Operational | `connections.closed_idle` |
+| `aerospike_client_node_connection_closed_node_removed` | counter | Operational | `connections.closed_node_removed` |
+| `aerospike_client_node_conn_latency_bucket` | counter | Operational | `nodes[].latency.conn` |
+| `aerospike_client_namespace_errors` | counter | Operational | `namespaces[].errors` |
+| `aerospike_client_namespace_server_timeouts` | counter | Operational | `namespaces[].timeouts` |
+| `aerospike_client_namespace_key_busy` | counter | Operational | `namespaces[].key_busy` |
+| `aerospike_client_namespace_record_too_big` | counter | Operational | `namespaces[].record_too_big` |
+| `aerospike_client_namespace_device_overload` | counter | Operational | `namespaces[].device_overload` |
+| `aerospike_client_namespace_bytes_in` | counter | Operational | `namespaces[].bytes_in` |
+| `aerospike_client_namespace_bytes_out` | counter | Operational | `namespaces[].bytes_out` |
+| `aerospike_client_namespace_latency_bucket` | counter | Operational | `namespaces[].latency` for `read`, `write`, `batch`, `query` |
+| `aerospike_client_feature_api_blocking` | counter | Usage | `usage["feature.api.blocking"]` |
+| `aerospike_client_feature_api_deferred` | counter | Usage | `usage["feature.api.deferred"]` |
+| `aerospike_client_feature_api_background` | counter | Usage | `usage["feature.api.background"]` |
+| `aerospike_client_feature_shape_point` | counter | Usage | `usage["feature.shape.point"]` |
+| `aerospike_client_feature_shape_batch` | counter | Usage | `usage["feature.shape.batch"]` |
+| `aerospike_client_feature_shape_query` | counter | Usage | `usage["feature.shape.query"]` |
+| `aerospike_client_feature_filter_ael` | counter | Usage | `usage["feature.filter.ael"]` |
+| `aerospike_client_feature_filter_exp` | counter | Usage | `usage["feature.filter.exp"]` |
+
+`aerospike_client_nodes_active` is the current cluster size. The common name
+table has no row for `cluster.nodes.active`. Cluster connection totals on
+`cluster.connections` are left on the snapshot. Pool gauges are the per-node
+series.
 
 Latency buckets are cumulative counters with an `le` label. The snapshot field
-`latency_unit` is a label on those three latency metrics. An existing-node
-open, TLS, or auth failure stays on the node
-(`aerospike.client.node.connection_open_failure` and the TLS and auth names).
-That is a different series from the cluster validation counters above.
+`latency_unit` is a label on each latency metric. A group whose `count` is
+0 is omitted. An existing-node open, TLS, or auth failure stays on the node
+(`aerospike_client_node_connection_open_failure` and the TLS and auth names),
+read from `connections.open_failure`, `tls_handshake_failure`, and
+`auth_failure`. Close reasons the stage client classifies are
+`aerospike_client_node_connection_closed_error`,
+`aerospike_client_node_connection_closed_idle`, and
+`aerospike_client_node_connection_closed_node_removed`. Stage has no
+`pool_shrink` counter.
+
+`aerospike_client_node_conn_latency_bucket` is socket-open latency from
+`nodes[].latency.conn`. Stage records pool-acquisition time on
+`namespaces[].latency.conn` instead, and that group is not exported. Client
+deadlines stay on `cluster.command_timeout_client`. The name table has no
+cluster series for that counter, and stage does not split it per namespace,
+so it is not published as `aerospike_client_namespace_client_timeouts`.
 
 Labels on every series include `cluster`, `client_type`, `client_version`,
 and `app_id`. Whether a client-object identifier should separate two clients
 that share those four values is an open question for the client team. Node
-series add `server_node_id`, `server_node_address`, and `server_node_port`.
-Namespace series also add `ns`. Those names stay, because the shorter spec
-names are generic enough to collide with application labels. A webapp label
-that uses one of the exported names is dropped. Exporter values win. Revisit
-the node and namespace names if the client or product team wants the spec
-names.
+series add `node`, `node_address`, and `node_port`. Namespace series also
+add `namespace`. A webapp label that uses one of those names is dropped.
+Exporter values win. `conn_type` is reserved and is not set: the Python SDK
+snapshot has one connection pool.
 
 `client_app_ip` is not a series label. In Kubernetes the default-route
 address is the pod address, so the label would create one series per pod.

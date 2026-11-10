@@ -48,7 +48,7 @@ from aerospike_client_telemetry.common import (
 )
 from aerospike_client_telemetry.common.catalog import MetricDescriptor
 
-_METER_NAME = "aerospike.client"
+_METER_NAME = "aerospike_client"
 _UNSET = object()
 # One provider has one meter. The meter keeps the first callbacks registered
 # for a name, so every exporter on that provider must publish into the

@@ -46,6 +46,8 @@ from aerospike_sdk.sync import ClusterDefinition
 from aerospike_client_telemetry.otel import OtelExporter
 from tests.integration.support import (
     CALLBACK_TIMEOUT_SECONDS,
+    active_node_count,
+    command_count,
     custom_metrics_settings,
     namespace,
     seed_host,
@@ -68,8 +70,8 @@ from opentelemetry.sdk.metrics.export import (
 )
 pytestmark = pytest.mark.integration
 
-_NODES = "aerospike.client.cluster.total_nodes"
-_PROMETHEUS_NODES = "aerospike_client_cluster_total_nodes"
+_NODES = "aerospike_client_nodes_active"
+_PROMETHEUS_NODES = "aerospike_client_nodes_active"
 
 
 class _Capture(MetricExporter):
@@ -159,7 +161,7 @@ def _scrape_nodes(port: int) -> float:
 def _otel_value(metrics_data, name: str) -> float | None:
     for resource in metrics_data.resource_metrics:
         for scope in resource.scope_metrics:
-            if scope.scope.name != "aerospike.client":
+            if scope.scope.name != "aerospike_client":
                 continue
             for metric in scope.metrics:
                 if metric.name != name:
@@ -173,8 +175,9 @@ def _otel_value(metrics_data, name: str) -> float | None:
 def _published_nodes(exporter: OtelExporter) -> float | None:
     for key in exporter.registry.client_keys():
         document = exporter.registry.current(key)
-        if document is not None and isinstance(document.get("total_nodes"), (int, float)):
-            return float(document["total_nodes"])
+        nodes = None if document is None else active_node_count(document)
+        if isinstance(nodes, (int, float)) and not isinstance(nodes, bool):
+            return float(nodes)
     return None
 
 
@@ -185,7 +188,7 @@ def _wait_for_publish(exporter: OtelExporter) -> float:
         if published is not None:
             return published
         time.sleep(0.05)
-    raise AssertionError("periodic scheduler did not publish total_nodes")
+    raise AssertionError("periodic scheduler did not publish nodes_active")
 
 
 def _connect(host: str, port: int):
@@ -296,7 +299,7 @@ def _assert_shared_series(capture: _SeriesCapture, published_nodes: float) -> No
     assert _wait_for_series(capture, "orders", _ORDERS_PLACED, lambda value: value == 2) == 2
     assert _wait_for_series(capture, "orders", _ORDERS_BACKLOG, lambda value: value == 4) == 4
     nodes = _wait_for_series(
-        capture, "aerospike.client", _NODES, lambda value: value == published_nodes
+        capture, "aerospike_client", _NODES, lambda value: value == published_nodes
     )
     assert nodes == published_nodes
 
@@ -308,7 +311,7 @@ def _assert_prometheus_mix(port: int, published_nodes: float) -> None:
     assert _prometheus_value(text, _PROMETHEUS_NODES) == published_nodes
 
 
-def test_prometheus_scrape_matches_published_total_nodes():
+def test_prometheus_scrape_matches_published_nodes_active():
     """Only the Prometheus reader. The live client series is served on its HTTP port."""
     host, seed_port = seed_host()
     reader = _prometheus_reader()
@@ -334,7 +337,7 @@ def test_prometheus_scrape_matches_published_total_nodes():
         provider.shutdown()
 
 
-def test_prometheus_and_otel_report_the_same_total_nodes():
+def test_prometheus_and_otel_report_the_same_nodes_active():
     host, seed_port = seed_host()
     capture = _Capture()
     periodic = PeriodicExportingMetricReader(capture, export_interval_millis=200)
@@ -657,8 +660,8 @@ def _wait_for_operational(exporter: OtelExporter, enabled: bool) -> dict:
             flag = document.get("operational_metrics_enabled") is True
             if (
                 flag is enabled
-                and isinstance(document.get("total_nodes"), (int, float))
-                and isinstance(document.get("command_count"), (int, float))
+                and isinstance(active_node_count(document), (int, float))
+                and isinstance(command_count(document), (int, float))
             ):
                 return document
         time.sleep(0.05)
@@ -703,7 +706,7 @@ def test_custom_reader_matches_official_reader_for_enabled_and_disabled_metrics(
             custom_text = generate_latest(custom_registry).decode()
             official_text = generate_latest(official_registry).decode()
             assert custom_text.splitlines() == official_text.splitlines()
-            assert _type_line(custom_text, "total_nodes", "gauge")
+            assert _type_line(custom_text, "nodes_active", "gauge")
             assert _type_line(custom_text, "invalid_node_count", "counter")
             if operational:
                 assert document.get("operational_metrics_enabled") is True

@@ -31,6 +31,7 @@ from aerospike_sdk.sync import ClusterDefinition
 from aerospike_client_telemetry import RecordingExporter
 from tests.integration.support import (
     CALLBACK_TIMEOUT_SECONDS,
+    command_count,
     custom_metrics_settings,
     dataset,
     seed_host,
@@ -107,9 +108,9 @@ def test_recording_exporter_and_json_file_receive_the_same_snapshot(capsys):
         assert document["app_id"] == record.app_id
         assert document["operational_metrics_enabled"] is True
         assert document["usage_metrics_enabled"] is True
-        assert document["command_count"] >= 1
-        assert document["usage"]["blocking"] >= 1
-        assert document["usage"]["shape_point"] >= 1
+        assert command_count(document) >= 1
+        assert document["usage"]["feature.api.blocking"] >= 1
+        assert document["usage"]["feature.shape.point"] >= 1
         with capsys.disabled():
             print(f"wrote {_OUTPUT}")
     finally:

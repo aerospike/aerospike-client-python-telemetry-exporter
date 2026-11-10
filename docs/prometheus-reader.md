@@ -204,8 +204,11 @@ Constructor. Monotonic sums become Prometheus counters. Cumulative
 non-monotonic sums become gauges. Gauges stay gauges. Histograms become
 Prometheus histograms. Any other metric type is logged and omitted. Names,
 units, help text, and labels follow the 0.66b1 exporter, including its
-leading-digit sanitizing. Aerospike metric names are not hardcoded. Scrapes
-are serialized so each response is one complete batch.
+leading-digit sanitizing. Client series are already `aerospike_client_*`,
+so that sanitizing leaves them unchanged. Counter samples gain `_total`.
+Brace units such as `{connection}` are not appended to the name. Aerospike
+metric names are not hardcoded in this reader. Scrapes are serialized so
+each response is one complete batch.
 
 `provider.shutdown()` unregisters the collector and stops an exporter-owned
 server without waiting for a scrape callback. A callback that is still

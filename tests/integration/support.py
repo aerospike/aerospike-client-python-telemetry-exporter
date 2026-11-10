@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 
 from aerospike_sdk.dataset import DataSet
@@ -61,12 +62,59 @@ def dataset():
     return DataSet.of(namespace(), "telemetry_exporter")
 
 
+def cluster_section(document: Mapping) -> Mapping:
+    """The ``cluster`` object on a stage canonical snapshot."""
+    cluster = document.get("cluster")
+    return cluster if isinstance(cluster, Mapping) else {}
+
+
+def command_count(document: Mapping):
+    """``cluster.command_count``, or ``None`` when the snapshot omits it."""
+    return cluster_section(document).get("command_count")
+
+
+def active_node_count(document: Mapping):
+    """``cluster.nodes.active``, the current cluster size."""
+    nodes = cluster_section(document).get("nodes")
+    if isinstance(nodes, Mapping):
+        return nodes.get("active")
+    return None
+
+
+def invalid_node_count(document: Mapping):
+    """``cluster.nodes.invalid``."""
+    nodes = cluster_section(document).get("nodes")
+    if isinstance(nodes, Mapping):
+        return nodes.get("invalid")
+    return None
+
+
+def namespace_latency_count(document: Mapping, group: str, namespace_name: str) -> int:
+    """Sum ``count`` for one latency group across nodes in that namespace."""
+    total = 0
+    for node in document.get("nodes") or []:
+        if not isinstance(node, Mapping):
+            continue
+        for namespace_doc in node.get("namespaces") or []:
+            if not isinstance(namespace_doc, Mapping):
+                continue
+            if namespace_doc.get("name") != namespace_name:
+                continue
+            latency = namespace_doc.get("latency")
+            if not isinstance(latency, Mapping):
+                continue
+            histogram = latency.get(group)
+            if isinstance(histogram, Mapping):
+                total += int(histogram.get("count") or 0)
+    return total
+
+
 def assert_same_cycle(left, right) -> None:
     """Two exporters observed one scheduler cycle.
 
-    ``to_canonical_dict()`` stamps ``timestamp`` when it is called, so two
-    translations of the same snapshot differ by the time between the calls.
-    A gap well under the export interval is the same cycle.
+    The snapshot stamps ``timestamp`` when it is built, so both translations
+    of one window carry that time. A gap well under the export interval is
+    the same cycle.
     """
     assert left.node_names == right.node_names
     assert left.command_count == right.command_count

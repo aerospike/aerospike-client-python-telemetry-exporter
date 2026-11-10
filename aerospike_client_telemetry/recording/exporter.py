@@ -48,7 +48,8 @@ def translate_snapshot(document: Mapping[str, Any]) -> RecordedExport:
     The document is only read. Nested containers are not stored, so a later
     mutation of the document cannot change the returned record.
     """
-    command_count = document.get("command_count")
+    cluster = document.get("cluster")
+    command_count = cluster.get("command_count") if isinstance(cluster, Mapping) else None
     nodes = document.get("nodes") or ()
     return RecordedExport(
         timestamp=str(document.get("timestamp", "")),
@@ -63,10 +64,10 @@ def translate_snapshot(document: Mapping[str, Any]) -> RecordedExport:
 
 
 def _node_name(node: Mapping[str, Any]) -> str:
-    name = node.get("node_name") or ""
+    name = node.get("name") or ""
     if name:
         return str(name)
-    return f"{node.get('node_address', '')}:{node.get('node_port', '')}"
+    return f"{node.get('address', '')}:{node.get('port', '')}"
 
 
 class _RecordingState:

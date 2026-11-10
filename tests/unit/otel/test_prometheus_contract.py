@@ -396,7 +396,15 @@ def test_callback_failure_and_timeout_do_not_block_snapshot_export():
     published = threading.Event()
 
     def publish():
-        exporter.export(_Snapshot({"client_type": "python-sdk", "app_id": "orders", "total_nodes": 1}))
+        exporter.export(
+            _Snapshot(
+                {
+                    "client_type": "python-sdk",
+                    "app_id": "orders",
+                    "cluster": {"nodes": {"active": 1}},
+                }
+            )
+        )
         published.set()
 
     scrape.start()

@@ -37,7 +37,14 @@ from aerospike_sdk.metrics import MetricsPolicy
 from aerospike_sdk.sync import ClusterDefinition
 
 from aerospike_client_telemetry.otel import OtelExporter
-from tests.integration.support import custom_metrics_settings, namespace, seed_host
+from tests.integration.support import (
+    active_node_count,
+    command_count,
+    custom_metrics_settings,
+    namespace,
+    namespace_latency_count,
+    seed_host,
+)
 
 pytest.importorskip("opentelemetry.sdk.metrics")
 pytest.importorskip("prometheus_client")
@@ -71,7 +78,7 @@ def _wait_for_commands(exporter: OtelExporter, app_id: str) -> dict:
     stable = 0
     while time.monotonic() < deadline:
         document = _current(exporter, app_id)
-        count = None if document is None else document.get("command_count")
+        count = None if document is None else command_count(document)
         if count == seen and isinstance(count, (int, float)) and count >= _COMMANDS:
             stable += 1
             if stable >= 2:
@@ -95,30 +102,18 @@ def _run_workload(cluster) -> str:
     return namespace()
 
 
-def _latency_count(document: dict, group: str, namespace_name: str) -> int:
-    total = 0
-    for node in document.get("nodes") or []:
-        for namespace_doc in node.get("namespaces") or []:
-            if namespace_doc.get("namespace") != namespace_name:
-                continue
-            for latency in namespace_doc.get("latencies") or []:
-                if latency.get("type") == group:
-                    total += int(latency.get("count", 0))
-    return total
-
-
 def _assert_snapshot(document: dict, namespace_name: str) -> None:
     """The exporter stored every tier of the counted workload."""
     assert document["operational_metrics_enabled"] is True
     assert document["usage_metrics_enabled"] is True
-    assert int(document["total_nodes"]) >= 1
-    assert "cpu_percent" in document
-    assert int(document["command_count"]) == _COMMANDS
-    assert _latency_count(document, "write", namespace_name) == _WRITES
-    assert _latency_count(document, "read", namespace_name) == _READS
+    assert int(active_node_count(document)) >= 1
+    assert "cpu_percent" in document["cluster"]
+    assert int(command_count(document)) == _COMMANDS
+    assert namespace_latency_count(document, "write", namespace_name) == _WRITES
+    assert namespace_latency_count(document, "read", namespace_name) == _READS
     usage = document["usage"]
-    assert int(usage["blocking"]) == _COMMANDS
-    assert int(usage["shape_point"]) == _COMMANDS
+    assert int(usage["feature.api.blocking"]) == _COMMANDS
+    assert int(usage["feature.shape.point"]) == _COMMANDS
 
 
 def _otel_sum(data, name: str, **attributes: str) -> float:
@@ -140,31 +135,31 @@ def _otel_sum(data, name: str, **attributes: str) -> float:
 
 
 def _assert_otel(data, namespace_name: str) -> None:
-    assert _otel_sum(data, "aerospike.client.cluster.total_nodes") >= 1
-    assert _otel_sum(data, "aerospike.client.cluster.cpu_percent") >= 0
-    assert _otel_sum(data, "aerospike.client.cluster.command_count") == _COMMANDS
+    assert _otel_sum(data, "aerospike_client_nodes_active") >= 1
+    assert _otel_sum(data, "aerospike_client_cpu_percent") >= 0
+    assert _otel_sum(data, "aerospike_client_command_count") == _COMMANDS
     assert (
         _otel_sum(
             data,
-            "aerospike.client.namespace.latency_bucket",
+            "aerospike_client_namespace_latency_bucket",
             latency_type="write",
             le="+Inf",
-            ns=namespace_name,
+            namespace=namespace_name,
         )
         == _WRITES
     )
     assert (
         _otel_sum(
             data,
-            "aerospike.client.namespace.latency_bucket",
+            "aerospike_client_namespace_latency_bucket",
             latency_type="read",
             le="+Inf",
-            ns=namespace_name,
+            namespace=namespace_name,
         )
         == _READS
     )
-    assert _otel_sum(data, "aerospike.client.feature.api_blocking") == _COMMANDS
-    assert _otel_sum(data, "aerospike.client.feature.shape_point") == _COMMANDS
+    assert _otel_sum(data, "aerospike_client_feature_api_blocking") == _COMMANDS
+    assert _otel_sum(data, "aerospike_client_feature_shape_point") == _COMMANDS
 
 
 def _prom_sum(text: str, name: str, **labels: str) -> float:
@@ -186,16 +181,16 @@ def _prom_sum(text: str, name: str, **labels: str) -> float:
 
 def _assert_prometheus(registry: CollectorRegistry, namespace_name: str) -> None:
     text = generate_latest(registry).decode()
-    assert _prom_sum(text, "aerospike_client_cluster_total_nodes") >= 1
-    assert _prom_sum(text, "aerospike_client_cluster_cpu_percent") >= 0
-    assert _prom_sum(text, "aerospike_client_cluster_command_count_total") == _COMMANDS
+    assert _prom_sum(text, "aerospike_client_nodes_active") >= 1
+    assert _prom_sum(text, "aerospike_client_cpu_percent") >= 0
+    assert _prom_sum(text, "aerospike_client_command_count_total") == _COMMANDS
     assert (
         _prom_sum(
             text,
             "aerospike_client_namespace_latency_bucket_total",
             latency_type="write",
             le="+Inf",
-            ns=namespace_name,
+            namespace=namespace_name,
         )
         == _WRITES
     )
@@ -205,7 +200,7 @@ def _assert_prometheus(registry: CollectorRegistry, namespace_name: str) -> None
             "aerospike_client_namespace_latency_bucket_total",
             latency_type="read",
             le="+Inf",
-            ns=namespace_name,
+            namespace=namespace_name,
         )
         == _READS
     )

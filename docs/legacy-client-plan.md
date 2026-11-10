@@ -70,7 +70,7 @@ first bound 1, last bucket `+Inf`):
 
 The legacy client sets `operational_metrics_enabled` to `metrics_enabled` and
 `usage_metrics_enabled` to `False`. Operational series are published.
-`aerospike.client.feature.*` is not.
+`aerospike_client_feature_*` is not.
 
 ## Decisions
 
@@ -127,16 +127,17 @@ project. Tests stay at the repo root and install the wheel they exercise.
 
 | Snapshot field | Reason |
 | --- | --- |
-| `namespace.client_timeouts`, `namespace.server_timeouts` | Only a combined `timeout_count` exists; it is not exported |
+| `namespace.timeouts`, `cluster.command_timeout_client` | Only a combined `timeout_count` exists; it is not exported |
 | `namespace.record_too_big`, `namespace.device_overload` | Not recorded |
-| `validation_open_failure`, `validation_tls_handshake_failure`, `validation_auth_failure` | Not recorded |
-| `node.connection_open_failure`, `node.connection_tls_handshake_failure`, `node.connection_auth_failure` | Not recorded |
-| `recover_queue_size`, `delay_queue_timeout_count`, `batch_partial_failure` | Not recorded |
+| `node.connections.open_failure` and the TLS and auth fields | Not recorded |
+| `cluster.recover_queue.size` | Not recorded |
 
 Other differences:
 
-- `cluster_latencies` is empty, so there are no cluster latency series.
-- Node `conn` latency is the sum of each namespace's `conn_latency`.
+- `cluster.latency` is empty, so `aerospike_client_latency_bucket` is absent.
+- Namespace `conn` is pool-acquisition time on the document. It is not exported.
+  Socket-open latency is `aerospike_client_node_conn_latency_bucket`, from
+  `nodes[].latency.conn`.
 - Async pool counts are not in the document.
 
 ## Work items
@@ -173,7 +174,7 @@ Other differences:
    shape. Assert:
    - Cluster, node, and namespace series appear.
    - `le` buckets are correct for shift 1 and shift 3.
-   - `aerospike.client.feature.*` and cluster latency series are absent.
+   - `aerospike_client_feature_*` and cluster latency series are absent.
    - A legacy snapshot and an SDK snapshot on one exporter stay separate by
      `client_type`.
    - Webapp instruments on the same provider still collect.
@@ -183,7 +184,7 @@ Other differences:
    testcontainer fixture, it:
    - Registers `OtelExporter(provider)` with `export_interval=1`.
    - Runs `put` and `get`.
-   - Asserts that `aerospike.client.cluster.total_nodes` and the namespace read
+   - Asserts that `aerospike_client_nodes_active` and the namespace read
      latency appear with `client_type="python"`, next to a webapp counter on the
      same provider.
 9. **CI.** In [build-test.yml](../.github/workflows/build-test.yml), build all
