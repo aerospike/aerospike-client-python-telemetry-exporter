@@ -1,9 +1,9 @@
 # Pull-request tests. Adapted from the client SDK's build-test workflow.
 #
-# The client SDK is pinned to a commit on CLIENT-OM-372. That commit depends
-# on aerospike-native==1.0.1.dev124. _SnapshotPolicy is on that commit and is
-# not in the published 1.0.0 release. This workflow does not build or publish
-# a wheel.
+# The client SDK is checked out from the stage branch. That branch depends
+# on aerospike-native==1.0.1.dev124. Its canonical snapshot is the nested
+# document these tests read, and that shape is not in the published 1.0.0
+# release. This workflow does not build or publish a wheel.
 
 name: CI Build & Test
 
@@ -22,10 +22,10 @@ permissions:
   id-token: write
 
 env:
-  # CLIENT-OM-372 at 68a8db6. Periodic export runs on aerospike-metrics-export.
+  # stage branch. Periodic export runs on aerospike-metrics-export.
   # Async exporter coroutines still run on the metrics-owned loop.
-  # _SnapshotPolicy is still present. The native pin is 1.0.1.dev124.
-  SDK_REF: 68a8db6d39544bb77f9c372fec8b3f3c4ddc2f4f
+  # command_timeout_client marks the nested snapshot. Native pin is 1.0.1.dev124.
+  SDK_REF: stage
 
 jobs:
   lint:
@@ -76,7 +76,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # The pinned SDK needs a matching aerospike-native dev wheel. Its
+        # The stage SDK needs a matching aerospike-native dev wheel. Its
         # dev channel publishes 3.14+ wheels; the syntax job retains the
         # exporter package's 3.11 floor check.
         python: ["3.14", "3.15"]
@@ -90,7 +90,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Checkout pinned client SDK
+      - name: Checkout client SDK stage
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: aerospike/aerospike-client-python-sdk
@@ -112,7 +112,7 @@ jobs:
           oidc-provider-name: ${{ vars.OIDC_PROVIDER_NAME || 'gh-aerospike' }}
           oidc-audience: ${{ vars.OIDC_AUDIENCE || 'aerospike' }}
 
-      - name: Install pinned SDK and exporter
+      - name: Install stage SDK and exporter
         env:
           JF_OIDC_USER: ${{ steps.jfrog.outputs.oidc-user }}
           JF_OIDC_TOKEN: ${{ steps.jfrog.outputs.oidc-token }}
@@ -124,7 +124,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev,otel,prometheus]" ./client-sdk --only-binary aerospike-native \
             --extra-index-url "https://${user_enc}:${JF_OIDC_TOKEN}@artifact.aerospike.io/artifactory/api/pypi/${{ vars.JFROG_PROJECT || 'database' }}-pypi-dev-local/simple/"
-          python -c "import inspect, aerospike_sdk.metrics.snapshot as snapshot; assert '_SnapshotPolicy' in inspect.getsource(snapshot), 'installed aerospike-sdk is not the pinned CLIENT-OM-372 commit'"
+          python -c "import inspect, aerospike_sdk.metrics.snapshot as snapshot; assert 'command_timeout_client' in inspect.getsource(snapshot), 'installed aerospike-sdk is not the stage snapshot'"
           # Comparison target for the custom reader. Not a production dependency.
           python -m pip install 'opentelemetry-exporter-prometheus==0.66b1'
 
@@ -156,7 +156,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Checkout pinned client SDK
+      - name: Checkout client SDK stage
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: aerospike/aerospike-client-python-sdk
@@ -178,7 +178,7 @@ jobs:
           oidc-provider-name: ${{ vars.OIDC_PROVIDER_NAME || 'gh-aerospike' }}
           oidc-audience: ${{ vars.OIDC_AUDIENCE || 'aerospike' }}
 
-      - name: Install pinned SDK and exporter
+      - name: Install stage SDK and exporter
         env:
           JF_OIDC_USER: ${{ steps.jfrog.outputs.oidc-user }}
           JF_OIDC_TOKEN: ${{ steps.jfrog.outputs.oidc-token }}
@@ -190,7 +190,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev,otel,prometheus]" ./client-sdk --only-binary aerospike-native \
             --extra-index-url "https://${user_enc}:${JF_OIDC_TOKEN}@artifact.aerospike.io/artifactory/api/pypi/${{ vars.JFROG_PROJECT || 'database' }}-pypi-dev-local/simple/"
-          python -c "import inspect, aerospike_sdk.metrics.snapshot as snapshot; assert '_SnapshotPolicy' in inspect.getsource(snapshot), 'installed aerospike-sdk is not the pinned CLIENT-OM-372 commit'"
+          python -c "import inspect, aerospike_sdk.metrics.snapshot as snapshot; assert 'command_timeout_client' in inspect.getsource(snapshot), 'installed aerospike-sdk is not the stage snapshot'"
           # Comparison target for the custom reader. Not a production dependency.
           python -m pip install 'opentelemetry-exporter-prometheus==0.66b1'
 

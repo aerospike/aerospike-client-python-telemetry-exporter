@@ -13,8 +13,8 @@
 """Hot-reload of metrics.labels in the SDK configuration file.
 
 A file that sets ``metrics.enabled`` owns the collection switch. A file that
-omits ``enabled`` leaves that switch under API control, while still applying
-its explicitly configured labels on reload.
+omits ``enabled`` leaves that switch under API control. Labels named in the
+file replace the map passed to ``enable_metrics``, including on reload.
 """
 
 from __future__ import annotations
@@ -129,14 +129,16 @@ def test_a_file_silent_on_enabled_refreshes_running_labels(tmp_path):
         try:
             cluster.add_exporter(exporter)
             cluster.enable_metrics(MetricsPolicy(labels={"environment": "from-code"}))
-            _wait_labels(exporter, lambda labels: labels.get("environment") == "from-code")
+            # The file's label map replaces the one passed to enable_metrics.
+            first = _wait_labels(exporter, lambda labels: labels.get("environment") == "prod")
+            assert "from-code" not in first.values()
+            assert "another_label" not in first
 
             path.write_text(_yaml({"environment": "prod", "another_label": "value"}, enabled=None))
             _bump_mtime(str(path))
-            time.sleep(2.5)
-            latest = exporter.records[-1].labels
+            latest = _wait_labels(exporter, lambda labels: labels.get("another_label") == "value")
             assert latest["environment"] == "prod"
-            assert latest["another_label"] == "value"
+            assert "from-code" not in latest.values()
         finally:
             cluster.disable_metrics()
             cluster.close()
